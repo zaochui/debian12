@@ -24,11 +24,13 @@ log_step() { echo -e "\n${BLUE}━━━━━━━━━━━━━━━━�
 
 # 全局变量
 HOSTNAME=""
+HOSTNAME_SHORT=""
 ADMIN_USER=""
 ADMIN_PASS=""
 SSH_PORT="22"
 KERNEL_VERSION=""
 HAS_BBR_SUPPORT=false
+SERVER_IP=""
 
 # 检查 root 权限
 check_root() {
@@ -64,6 +66,14 @@ check_system() {
         HAS_BBR_SUPPORT=false
         log_warn "当前内核版本不支持 BBR"
     fi
+    
+    # 获取服务器公网IP
+    SERVER_IP=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -1)
+    if [ -z "$SERVER_IP" ]; then
+        # 备用方法获取IP
+        SERVER_IP=$(curl -s -4 ifconfig.me 2>/dev/null || wget -qO- -4 ifconfig.me 2>/dev/null)
+    fi
+    log_info "服务器IP: $SERVER_IP"
 }
 
 # 获取用户输入
@@ -73,13 +83,18 @@ get_user_input() {
     # 获取服务器名称
     current_hostname=$(hostname)
     log_info "当前服务器名称: $current_hostname"
-    read -p "请输入新的服务器名称 (直接回车保持当前): " HOSTNAME
+    
+    # 询问完整域名
+    read -p "请输入服务器完整域名 (如: mail.zaochui.org): " HOSTNAME
     if [[ -z "$HOSTNAME" ]]; then
         HOSTNAME="$current_hostname"
         log_info "保持当前服务器名称: $HOSTNAME"
-    else
-        log_info "新服务器名称: $HOSTNAME"
     fi
+    
+    # 提取短名称（第一个点之前的部分）
+    HOSTNAME_SHORT=$(echo "$HOSTNAME" | cut -d. -f1)
+    log_info "短名称: $HOSTNAME_SHORT"
+    log_info "完整域名: $HOSTNAME"
     
     # 获取管理员用户名
     while true; do
@@ -127,7 +142,9 @@ get_user_input() {
     fi
     
     echo -e "\n${GREEN}配置信息确认：${NC}"
-    echo -e "  服务器名称: ${YELLOW}$HOSTNAME${NC}"
+    echo -e "  服务器域名: ${YELLOW}$HOSTNAME${NC}"
+    echo -e "  服务器短名: ${YELLOW}$HOSTNAME_SHORT${NC}"
+    echo -e "  服务器IP: ${YELLOW}$SERVER_IP${NC}"
     echo -e "  管理员用户: ${YELLOW}$ADMIN_USER${NC}"
     echo -e "  SSH端口: ${YELLOW}$SSH_PORT${NC}"
     
@@ -137,26 +154,42 @@ get_user_input() {
     fi
 }
 
-# 设置服务器名称
+# 设置服务器名称（改进版）
 set_hostname() {
-    if [[ "$HOSTNAME" != "$(hostname)" ]]; then
-        log_step "设置服务器名称"
-        
-        # 设置hostname
-        hostnamectl set-hostname "$HOSTNAME" 2>/dev/null || hostname "$HOSTNAME"
-        
-        # 更新 /etc/hostname
-        echo "$HOSTNAME" > /etc/hostname
-        
-        # 更新 /etc/hosts
-        if ! grep -q "127.0.1.1" /etc/hosts; then
-            echo "127.0.1.1    $HOSTNAME" >> /etc/hosts
-        else
-            sed -i "s/127.0.1.1.*/127.0.1.1    $HOSTNAME/" /etc/hosts
-        fi
-        
-        log_info "服务器名称已设置为: $HOSTNAME"
-    fi
+    log_step "设置服务器名称"
+    
+    # 设置hostname
+    hostnamectl set-hostname "$HOSTNAME" 2>/dev/null || hostname "$HOSTNAME"
+    
+    # 更新 /etc/hostname
+    echo "$HOSTNAME_SHORT" > /etc/hostname
+    
+    # 完整更新 /etc/hosts 文件
+    log_info "更新 /etc/hosts 文件..."
+    
+    # 创建新的 hosts 文件内容
+    cat > /etc/hosts << EOF
+# System hosts file
+# Updated by Debian Security Setup Script on $(date)
+
+# Localhost entries
+127.0.0.1       localhost localhost.localdomain
+::1             localhost localhost.localdomain
+
+# Hostname entries
+127.0.1.1       $HOSTNAME $HOSTNAME_SHORT
+
+# Server IP mapping
+$SERVER_IP      $HOSTNAME $HOSTNAME_SHORT
+EOF
+    
+    log_info "hosts 文件已更新："
+    cat /etc/hosts
+    
+    # 验证设置
+    log_info "验证主机名设置："
+    log_info "  hostname: $(hostname)"
+    log_info "  hostname -f: $(hostname -f 2>/dev/null || echo '无法解析')"
 }
 
 # 全量系统更新
@@ -217,7 +250,7 @@ install_packages() {
     fi
 }
 
-# 创建管理用户（修复密码输入问题）
+# 创建管理用户
 create_admin_user() {
     log_step "配置管理用户: $ADMIN_USER"
     
@@ -530,6 +563,7 @@ create_motd() {
 ╠══════════════════════════════════════════════════════════╣
 ║  系统信息:                                               ║
 ║  • 主机名称: $HOSTNAME
+║  • 服务器IP: $SERVER_IP
 ║  • 内核版本: $kernel_info
 ║  • 管理用户: $ADMIN_USER
 ║  • SSH端口: $SSH_PORT
@@ -543,6 +577,13 @@ EOF
 # 系统测试函数
 test_configuration() {
     log_step "测试配置"
+    
+    # 测试主机名
+    if hostname -f &>/dev/null; then
+        log_info "✓ 主机名配置正常: $(hostname -f)"
+    else
+        log_warn "⚠ 主机名可能未正确配置"
+    fi
     
     # 测试SSH
     if sshd -t &>/dev/null; then
@@ -582,6 +623,7 @@ show_completion_info() {
     
     echo -e "${GREEN}✅ 已完成的配置：${NC}"
     echo -e "  • 服务器名称: ${YELLOW}$HOSTNAME${NC}"
+    echo -e "  • hosts文件已正确配置"
     echo -e "  • 完整系统更新"
     echo -e "  • 管理用户创建: ${YELLOW}$ADMIN_USER${NC}"
     echo -e "  • SSH安全配置 (端口: ${YELLOW}$SSH_PORT${NC})"
@@ -597,8 +639,9 @@ show_completion_info() {
     echo -e "\n${YELLOW}═══════════════════════════════════════════${NC}"
     echo -e "${YELLOW}📝 重要信息（请保存）：${NC}"
     echo -e "${YELLOW}═══════════════════════════════════════════${NC}"
-    echo -e "服务器名称: ${GREEN}$HOSTNAME${NC}"
-    echo -e "SSH连接命令: ${GREEN}ssh -p $SSH_PORT $ADMIN_USER@服务器IP${NC}"
+    echo -e "服务器域名: ${GREEN}$HOSTNAME${NC}"
+    echo -e "服务器IP: ${GREEN}$SERVER_IP${NC}"
+    echo -e "SSH连接命令: ${GREEN}ssh -p $SSH_PORT $ADMIN_USER@$SERVER_IP${NC}"
     echo -e "管理员用户: ${GREEN}$ADMIN_USER${NC}"
     echo -e "SSH端口: ${GREEN}$SSH_PORT${NC}"
     echo -e "${YELLOW}═══════════════════════════════════════════${NC}"
@@ -614,7 +657,8 @@ show_completion_info() {
     echo -e "  查看防火墙: ${BLUE}sudo ufw status${NC}"
     echo -e "  查看Fail2ban: ${BLUE}sudo fail2ban-client status${NC}"
     echo -e "  查看系统日志: ${BLUE}sudo journalctl -xe${NC}"
-    echo -e "  测试BBR: ${BLUE}sysctl net.ipv4.tcp_congestion_control${NC}"
+    echo -e "  测试BBR: ${BLUE}sudo sysctl net.ipv4.tcp_congestion_control${NC}"
+    echo -e "  查看hosts: ${BLUE}cat /etc/hosts${NC}"
     
     echo -e "\n${YELLOW}📊 自动更新时间：${NC}"
     echo -e "  系统将在每天 6:00 和 18:00 自动检查更新"
@@ -626,15 +670,20 @@ Debian Server Configuration Information
 ========================================
 Date: $(date)
 Hostname: $HOSTNAME
+Short Name: $HOSTNAME_SHORT
+Server IP: $SERVER_IP
 Admin User: $ADMIN_USER
 SSH Port: $SSH_PORT
 Kernel: $(uname -r)
 BBR Status: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "N/A")
 
 SSH Connection:
-ssh -p $SSH_PORT $ADMIN_USER@YOUR_SERVER_IP
+ssh -p $SSH_PORT $ADMIN_USER@$SERVER_IP
 
 Important: Root login is disabled!
+
+/etc/hosts content:
+$(cat /etc/hosts)
 ========================================
 EOF
     
@@ -656,7 +705,7 @@ main() {
     # 用户输入
     get_user_input
     
-    # 设置服务器名称
+    # 设置服务器名称（包括hosts文件）
     set_hostname
     
     # 执行配置
