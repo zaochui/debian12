@@ -2,7 +2,7 @@
 
 # ============================================================================
 # Debian 12 一键配置脚本 (修复版)
-# 修复 Fail2Ban 启动问题 + BBRv3 + 密码登录
+# 包含：禁用root登录 + Fail2Ban修复 + BBRv3 + 密码登录
 # ============================================================================
 
 set -e
@@ -33,11 +33,6 @@ install_and_fix_fail2ban() {
     # 安装 Fail2Ban
     apt install -y fail2ban
     
-    # 确保服务目录存在
-    mkdir -p /var/run/fail2ban
-    chown root:root /var/run/fail2ban
-    chmod 755 /var/run/fail2ban
-    
     # 创建简化配置
     cat > /etc/fail2ban/jail.local << 'EOF'
 [sshd]
@@ -62,33 +57,18 @@ EOF
     systemctl enable fail2ban
     systemctl start fail2ban
     
-    # 检查服务状态
-    if systemctl is-active --quiet fail2ban; then
-        log_info "Fail2Ban 服务已成功启动"
-    else
-        log_warn "Fail2Ban 服务启动失败，尝试修复..."
-        systemctl restart fail2ban
-        sleep 2
-        systemctl status fail2ban --no-pager -l
-    fi
+    sleep 2  # 等待服务启动
+    log_info "Fail2Ban 服务已配置"
 }
 
-# 显示 Fail2Ban 状态（修复版）
+# 显示 Fail2Ban 状态
 show_fail2ban_status() {
-    echo -e "\n${GREEN}检查 Fail2Ban 状态:${NC}"
-    
+    echo -e "\n${GREEN}Fail2Ban 状态检查:${NC}"
     if systemctl is-active --quiet fail2ban; then
         echo -e "${GREEN}✓ Fail2Ban 服务运行正常${NC}"
-        # 使用更可靠的方式检查状态
-        if command -v fail2ban-client >/dev/null 2>&1; then
-            echo -e "\n${YELLOW}Fail2Ban 监控的服務:${NC}"
-            systemctl status fail2ban --no-pager -l | grep "Active:" || true
-        fi
     else
-        echo -e "${RED}✗ Fail2Ban 服务未运行${NC}"
-        echo -e "${YELLOW}尝试启动 Fail2Ban...${NC}"
+        echo -e "${RED}✗ Fail2Ban 服务未运行，正在尝试启动...${NC}"
         systemctl start fail2ban
-        systemctl status fail2ban --no-pager -l
     fi
 }
 
@@ -181,17 +161,29 @@ create_admin_user() {
     
     echo "$username ALL=(ALL:ALL) ALL" >> /etc/sudoers
     echo "$username" > /root/.debian_setup_username
+    log_info "已为用户 $username 添加 sudo 权限"
 }
 
-# 配置 SSH（密码认证）
+# 配置 SSH（密码认证 + 禁用root登录）
 configure_ssh_password() {
-    log_info "配置 SSH（密码认证）..."
+    log_info "配置 SSH（密码认证 + 禁用root登录）..."
     
     local ssh_config="/etc/ssh/sshd_config"
-    cp "$ssh_config" "${ssh_config}.backup.$(date +%Y%m%d)"
+    local backup_file="$ssh_config.backup.$(date +%Y%m%d_%H%M%S)"
     
-    sed -i 's/#PermitRootLogin yes/PermitRootLogin no/' "$ssh_config"
-    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' "$ssh_config"
+    # 备份原配置
+    cp "$ssh_config" "$backup_file"
+    log_info "SSH 配置已备份到: $backup_file"
+    
+    # 安全配置选项 - 禁用root登录，启用密码认证
+    sed -i 's/#*PermitRootLogin.*/PermitRootLogin no/' "$ssh_config"
+    sed -i 's/#*PasswordAuthentication.*/PasswordAuthentication yes/' "$ssh_config"
+    sed -i 's/#*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' "$ssh_config"
+    
+    # 添加额外安全设置
+    echo "MaxAuthTries 3" >> "$ssh_config"
+    echo "ClientAliveInterval 300" >> "$ssh_config"
+    echo "ClientAliveCountMax 2" >> "$ssh_config"
     
     systemctl restart ssh
     log_info "SSH 已配置：禁用root登录，启用密码认证"
@@ -204,20 +196,29 @@ configure_locales() {
     sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
     locale-gen
     update-locale LANG=en_US.UTF-8
+    log_info "区域设置完成"
 }
 
 # 安装监控工具
 install_monitoring_tools() {
     log_info "安装系统监控工具..."
     apt install -y htop iotop iftop nload
+    log_info "监控工具安装完成"
 }
 
 # 创建登录欢迎信息
 create_motd() {
+    log_info "配置登录欢迎信息..."
     cat > /etc/motd << 'EOF'
 =============================================
 =             Debian 12 Server              =
 =      BBRv3 + Fail2Ban + 安全配置         =
+=============================================
+已启用:
+- BBRv3 网络加速
+- Fail2Ban 防暴力破解
+- 防火墙保护
+- SSH 安全配置（禁用root登录）
 =============================================
 EOF
 }
@@ -230,22 +231,36 @@ show_summary() {
     echo "           配置完成摘要"
     echo "===========================================${NC}"
     
-    echo -e "${GREEN}✅ 所有基础配置完成"
+    echo -e "${GREEN}✅ 系统基础工具安装完成"
+    echo -e "✅ 系统更新完成"
+    echo -e "✅ 防火墙配置完成"
+    echo -e "✅ 管理用户创建完成"
+    echo -e "✅ SSH 安全配置完成（root登录已禁用）"
+    echo -e "✅ 区域设置完成"
     echo -e "✅ BBRv3 网络优化启用"
     echo -e "✅ Fail2Ban 防爆破安装完成"
-    echo -e "✅ 防火墙配置完成${NC}"
+    echo -e "✅ 监控工具安装完成${NC}"
     
-    echo -e "\n${YELLOW}连接信息:${NC}"
+    echo -e "\n${YELLOW}SSH 连接信息:${NC}"
     echo -e "用户名: $username"
-    echo -e "连接: ssh $username@服务器IP"
+    echo -e "连接命令: ssh $username@你的服务器IP"
+    echo -e "认证方式: 密码认证"
+    echo -e "${RED}注意: root 登录已禁用！${NC}"
     
     echo -e "\n${YELLOW}安全防护:${NC}"
-    echo -e "✔ 3次登录失败封禁IP 1小时"
+    echo -e "✔ Fail2Ban 已启用: 3次失败登录禁止1小时"
+    echo -e "✔ 防火墙已启用: 开放 22,80,443 端口"
     echo -e "✔ root SSH 登录已禁用"
-    echo -e "✔ 防火墙已启用"
+    echo -e "✔ BBRv3 网络加速已启用"
     
     show_fail2ban_status
     
+    echo -e "\n${RED}重要提示:${NC}"
+    echo -e "1. 请使用创建的用户名和密码登录"
+    echo -e "2. 连续3次密码错误将被封禁IP 1小时"
+    echo -e "3. root 用户无法直接SSH登录"
+    echo -e "4. 重启后所有配置生效"
+
     echo -e "\n${GREEN}===========================================${NC}"
 }
 
@@ -254,19 +269,26 @@ reboot_prompt() {
     echo -e "\n${YELLOW}需要重启使内核和BBRv3生效${NC}"
     read -p "是否立即重启? (y/N): " choice
     case "${choice:-n}" in
-        y|Y) reboot ;;
-        *) echo "请手动重启";;
+        y|Y) 
+            log_info "系统将在 5 秒后重启..."
+            sleep 5
+            reboot 
+            ;;
+        *) 
+            log_info "请手动重启服务器以使所有配置生效"
+            ;;
     esac
 }
 
 # 主配置函数
 main() {
+    log_info "开始 Debian 12 安全配置..."
     check_root
     install_basics
     system_upgrade
     setup_firewall
     create_admin_user
-    configure_ssh_password
+    configure_ssh_password  # 这里包含了禁用root登录
     configure_locales
     install_bbrv3_kernel
     configure_bbrv3
@@ -275,7 +297,6 @@ main() {
     create_motd
     show_summary
     reboot_prompt
-    
     log_info "配置完成!"
 }
 
