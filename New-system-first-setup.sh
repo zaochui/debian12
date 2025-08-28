@@ -23,7 +23,9 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_step() { echo -e "\n${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n${MAGENTA}[步骤]${NC} $1\n${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; }
 
 # 全局变量
+HOSTNAME=""
 ADMIN_USER=""
+ADMIN_PASS=""
 SSH_PORT="22"
 KERNEL_VERSION=""
 HAS_BBR_SUPPORT=false
@@ -68,6 +70,17 @@ check_system() {
 get_user_input() {
     log_step "配置信息收集"
     
+    # 获取服务器名称
+    current_hostname=$(hostname)
+    log_info "当前服务器名称: $current_hostname"
+    read -p "请输入新的服务器名称 (直接回车保持当前): " HOSTNAME
+    if [[ -z "$HOSTNAME" ]]; then
+        HOSTNAME="$current_hostname"
+        log_info "保持当前服务器名称: $HOSTNAME"
+    else
+        log_info "新服务器名称: $HOSTNAME"
+    fi
+    
     # 获取管理员用户名
     while true; do
         read -p "请输入管理员用户名 (不要使用root): " ADMIN_USER
@@ -79,9 +92,30 @@ get_user_input() {
             log_warn "用户 $ADMIN_USER 已存在"
             read -p "是否使用现有用户？(y/N): " -r
             if [[ $REPLY =~ ^[Yy]$ ]]; then
+                log_info "使用现有用户，需要设置新密码"
                 break
             fi
         else
+            break
+        fi
+    done
+    
+    # 获取管理员密码
+    while true; do
+        echo -e "${YELLOW}请设置 $ADMIN_USER 用户的密码:${NC}"
+        read -s -p "输入密码: " ADMIN_PASS
+        echo
+        read -s -p "确认密码: " ADMIN_PASS_CONFIRM
+        echo
+        
+        if [[ -z "$ADMIN_PASS" ]]; then
+            log_error "密码不能为空"
+        elif [[ "$ADMIN_PASS" != "$ADMIN_PASS_CONFIRM" ]]; then
+            log_error "两次输入的密码不一致，请重新输入"
+        elif [[ ${#ADMIN_PASS} -lt 6 ]]; then
+            log_error "密码长度至少需要6个字符"
+        else
+            log_info "密码设置成功"
             break
         fi
     done
@@ -92,13 +126,36 @@ get_user_input() {
         SSH_PORT="$input_port"
     fi
     
-    log_info "配置信息："
-    log_info "  管理员用户: $ADMIN_USER"
-    log_info "  SSH端口: $SSH_PORT"
+    echo -e "\n${GREEN}配置信息确认：${NC}"
+    echo -e "  服务器名称: ${YELLOW}$HOSTNAME${NC}"
+    echo -e "  管理员用户: ${YELLOW}$ADMIN_USER${NC}"
+    echo -e "  SSH端口: ${YELLOW}$SSH_PORT${NC}"
     
     read -p "确认以上信息正确？(Y/n): " -r
     if [[ $REPLY =~ ^[Nn]$ ]]; then
         get_user_input
+    fi
+}
+
+# 设置服务器名称
+set_hostname() {
+    if [[ "$HOSTNAME" != "$(hostname)" ]]; then
+        log_step "设置服务器名称"
+        
+        # 设置hostname
+        hostnamectl set-hostname "$HOSTNAME" 2>/dev/null || hostname "$HOSTNAME"
+        
+        # 更新 /etc/hostname
+        echo "$HOSTNAME" > /etc/hostname
+        
+        # 更新 /etc/hosts
+        if ! grep -q "127.0.1.1" /etc/hosts; then
+            echo "127.0.1.1    $HOSTNAME" >> /etc/hosts
+        else
+            sed -i "s/127.0.1.1.*/127.0.1.1    $HOSTNAME/" /etc/hosts
+        fi
+        
+        log_info "服务器名称已设置为: $HOSTNAME"
     fi
 }
 
@@ -160,7 +217,7 @@ install_packages() {
     fi
 }
 
-# 创建管理用户
+# 创建管理用户（修复密码输入问题）
 create_admin_user() {
     log_step "配置管理用户: $ADMIN_USER"
     
@@ -170,14 +227,17 @@ create_admin_user() {
         usermod -aG sudo "$ADMIN_USER" 2>/dev/null || true
         log_info "用户 $ADMIN_USER 创建成功"
     else
-        log_info "使用现有用户 $ADMIN_USER"
+        log_info "用户 $ADMIN_USER 已存在，更新密码"
     fi
     
-    # 设置密码
-    log_info "请设置 $ADMIN_USER 用户的密码："
-    while ! passwd "$ADMIN_USER"; do
-        log_error "密码设置失败，请重试"
-    done
+    # 设置密码（使用前面收集的密码）
+    echo "$ADMIN_USER:$ADMIN_PASS" | chpasswd
+    if [ $? -eq 0 ]; then
+        log_info "用户密码设置成功"
+    else
+        log_error "密码设置失败，尝试手动设置"
+        passwd "$ADMIN_USER"
+    fi
     
     # 配置sudo权限
     local sudoers_file="/etc/sudoers.d/90-$ADMIN_USER"
@@ -469,6 +529,7 @@ create_motd() {
 ║          Debian Security Hardened Server                ║
 ╠══════════════════════════════════════════════════════════╣
 ║  系统信息:                                               ║
+║  • 主机名称: $HOSTNAME
 ║  • 内核版本: $kernel_info
 ║  • 管理用户: $ADMIN_USER
 ║  • SSH端口: $SSH_PORT
@@ -520,6 +581,7 @@ show_completion_info() {
     echo -e "╚══════════════════════════════════════════════════════════╝${NC}\n"
     
     echo -e "${GREEN}✅ 已完成的配置：${NC}"
+    echo -e "  • 服务器名称: ${YELLOW}$HOSTNAME${NC}"
     echo -e "  • 完整系统更新"
     echo -e "  • 管理用户创建: ${YELLOW}$ADMIN_USER${NC}"
     echo -e "  • SSH安全配置 (端口: ${YELLOW}$SSH_PORT${NC})"
@@ -532,13 +594,14 @@ show_completion_info() {
     fi
     echo -e "  • 自动安全更新"
     
-    echo -e "\n${YELLOW}📝 重要信息（请保存）：${NC}"
-    echo -e "┌────────────────────────────────────────┐"
-    echo -e "│ SSH连接信息:                          │"
-    echo -e "│ 命令: ${BLUE}ssh -p $SSH_PORT $ADMIN_USER@服务器IP${NC}"
-    echo -e "│ 用户: ${YELLOW}$ADMIN_USER${NC}"
-    echo -e "│ 端口: ${YELLOW}$SSH_PORT${NC}"
-    echo -e "└────────────────────────────────────────┘"
+    echo -e "\n${YELLOW}═══════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}📝 重要信息（请保存）：${NC}"
+    echo -e "${YELLOW}═══════════════════════════════════════════${NC}"
+    echo -e "服务器名称: ${GREEN}$HOSTNAME${NC}"
+    echo -e "SSH连接命令: ${GREEN}ssh -p $SSH_PORT $ADMIN_USER@服务器IP${NC}"
+    echo -e "管理员用户: ${GREEN}$ADMIN_USER${NC}"
+    echo -e "SSH端口: ${GREEN}$SSH_PORT${NC}"
+    echo -e "${YELLOW}═══════════════════════════════════════════${NC}"
     
     if [[ "$SSH_PORT" != "22" ]]; then
         echo -e "\n${RED}⚠️  重要提醒：${NC}"
@@ -555,6 +618,27 @@ show_completion_info() {
     
     echo -e "\n${YELLOW}📊 自动更新时间：${NC}"
     echo -e "  系统将在每天 6:00 和 18:00 自动检查更新"
+    
+    # 保存配置信息到文件
+    cat > /root/server_info.txt << EOF
+========================================
+Debian Server Configuration Information
+========================================
+Date: $(date)
+Hostname: $HOSTNAME
+Admin User: $ADMIN_USER
+SSH Port: $SSH_PORT
+Kernel: $(uname -r)
+BBR Status: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "N/A")
+
+SSH Connection:
+ssh -p $SSH_PORT $ADMIN_USER@YOUR_SERVER_IP
+
+Important: Root login is disabled!
+========================================
+EOF
+    
+    log_info "配置信息已保存到: /root/server_info.txt"
 }
 
 # 主函数
@@ -571,6 +655,9 @@ main() {
     
     # 用户输入
     get_user_input
+    
+    # 设置服务器名称
+    set_hostname
     
     # 执行配置
     full_system_update
