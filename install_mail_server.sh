@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ============================================================================
-# Debian 12 邮件服务器一键部署脚本
-# 版本: 2.0.0
+# Debian 12 邮件服务器一键部署脚本 - 最终修复版
+# 版本: 2.2.0
 # 作者: 开源社区版
 # 协议: MIT
 # 
@@ -15,8 +15,7 @@
 # - 用户管理工具
 # - 健康检查监控
 # 
-# 使用方法: wget -O - https://raw.githubusercontent.com/zaochui/debian12/main/install_mail_server.sh | sudo bash
-# 项目地址: https://raw.githubusercontent.com/zaochui/debian12/main/install_mail_server.sh
+# 使用方法: bash install_mail_server.sh
 # ============================================================================
 
 set -eo pipefail
@@ -25,7 +24,7 @@ set -eo pipefail
 # 全局配置变量
 # ============================================================================
 
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="2.2.0"
 SCRIPT_NAME="Debian 12 邮件服务器部署脚本"
 LOG_FILE="/var/log/mail-server-setup.log"
 BACKUP_DIR="/var/backups/mail-setup-$(date +%Y%m%d_%H%M%S)"
@@ -108,24 +107,6 @@ confirm() {
     fi
 }
 
-# 进度条
-show_progress() {
-    local current=$1
-    local total=$2
-    local width=50
-    local percentage=$((current * 100 / total))
-    local completed=$((width * current / total))
-    
-    printf "\r进度: ["
-    printf "%${completed}s" | tr ' ' '='
-    printf "%$((width - completed))s" | tr ' ' '-'
-    printf "] %d%%" $percentage
-    
-    if [ $current -eq $total ]; then
-        echo
-    fi
-}
-
 # ============================================================================
 # 系统要求检查
 # ============================================================================
@@ -158,7 +139,7 @@ check_requirements() {
     
     # 检查网络连接
     info "检查网络连接..."
-    if ! ping -c 1 -W 2 223.5.5.5 &> /dev/null && ! ping -c 1 -W 2 8.8.8.8 &> /dev/null; then
+    if ! ping -c 1 -W 2 8.8.8.8 &> /dev/null && ! ping -c 1 -W 2 1.1.1.1 &> /dev/null; then
         error_exit "无法连接到互联网。请检查网络设置。"
     fi
     
@@ -168,15 +149,100 @@ check_requirements() {
         error_exit "磁盘空间不足。至少需要 1GB 可用空间。"
     fi
     
-    # 检查是否已安装邮件服务
-    if systemctl is-active --quiet postfix || systemctl is-active --quiet dovecot; then
-        warning "检测到已安装的邮件服务。"
-        if ! confirm "是否继续？这可能会覆盖现有配置"; then
-            exit 0
+    # 检查内存
+    local total_mem=$(free -m | awk 'NR==2{print $2}')
+    if [[ $total_mem -lt 512 ]]; then
+        warning "内存少于 512MB，可能会影响安装"
+        # 创建 swap 文件
+        if ! swapon -s | grep -q swap; then
+            info "创建 swap 文件..."
+            fallocate -l 1G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=1024
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+            echo "/swapfile none swap sw 0 0" >> /etc/fstab
+            success "Swap 文件创建成功"
         fi
     fi
     
     success "系统环境检查通过"
+}
+
+# ============================================================================
+# 修复和配置软件源
+# ============================================================================
+
+fix_apt_sources() {
+    info "配置软件源..."
+    
+    # 备份原始源
+    cp /etc/apt/sources.list /etc/apt/sources.list.backup.$(date +%Y%m%d) 2>/dev/null || true
+    
+    # 配置标准 Debian 源
+    cat > /etc/apt/sources.list << EOF
+deb http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware
+deb http://deb.debian.org/debian/ bookworm-updates main contrib non-free non-free-firmware
+deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
+EOF
+    
+    # 清理缓存
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+    
+    # 更新源
+    apt-get update || {
+        warning "主源更新失败，尝试备用源..."
+        cat > /etc/apt/sources.list << EOF
+deb http://mirrors.ustc.edu.cn/debian/ bookworm main contrib non-free non-free-firmware
+deb http://mirrors.ustc.edu.cn/debian/ bookworm-updates main contrib non-free non-free-firmware
+deb http://mirrors.ustc.edu.cn/debian-security bookworm-security main contrib non-free non-free-firmware
+EOF
+        apt-get update
+    }
+    
+    # 修复可能的依赖问题
+    apt-get install -f -y
+    dpkg --configure -a
+    
+    success "软件源配置完成"
+}
+
+# ============================================================================
+# 清理和修复现有安装
+# ============================================================================
+
+cleanup_existing_installation() {
+    info "检查并修复现有安装..."
+    
+    # 检查 Postfix 状态
+    if dpkg -l | grep -q "^iF.*postfix"; then
+        warning "检测到 Postfix 安装未完成，尝试修复..."
+        
+        # 获取正确的主机名和域名
+        local temp_hostname=$(hostname -f 2>/dev/null || hostname)
+        if [[ "$temp_hostname" == *.* ]]; then
+            TEMP_DOMAIN=$(echo "$temp_hostname" | cut -d. -f2-)
+        else
+            TEMP_DOMAIN="localdomain"
+            temp_hostname="mail.$TEMP_DOMAIN"
+        fi
+        
+        # 修复 Postfix 配置
+        postconf -e "myhostname = $temp_hostname"
+        postconf -e "mydomain = $TEMP_DOMAIN"
+        postconf -e "myorigin = \$mydomain"
+        postconf -e "mydestination = \$myhostname, localhost.\$mydomain, localhost"
+        
+        # 尝试完成配置
+        newaliases 2>/dev/null || true
+        dpkg --configure postfix 2>/dev/null || true
+    fi
+    
+    # 修复所有未配置的包
+    dpkg --configure -a 2>/dev/null || true
+    apt-get install -f -y 2>/dev/null || true
+    
+    success "清理完成"
 }
 
 # ============================================================================
@@ -194,12 +260,6 @@ create_backup() {
             cp -a "$item" "$BACKUP_DIR/" 2>/dev/null || true
         fi
     done
-    
-    # 保存当前软件包列表
-    dpkg -l > "$BACKUP_DIR/package_list.txt"
-    
-    # 保存当前服务状态
-    systemctl list-units --state=running > "$BACKUP_DIR/running_services.txt"
     
     success "备份已创建: $BACKUP_DIR"
 }
@@ -226,9 +286,9 @@ configure_hostname() {
         fi
     }
     
-    # 检查当前主机名
-    if ! is_valid_fqdn "$current_hostname"; then
-        warning "当前主机名不是有效的完全限定域名 (FQDN)"
+    # 检查当前主机名是否是 IP 地址或无效
+    if [[ "$current_hostname" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || ! is_valid_fqdn "$current_hostname"; then
+        warning "当前主机名无效或是 IP 地址"
         echo "邮件服务器需要一个正确的 FQDN，例如: mail.example.com"
         read -p "请输入邮件服务器主机名: " new_hostname
         
@@ -250,16 +310,26 @@ configure_hostname() {
     fi
     
     # 设置主机名
-    hostnamectl set-hostname "$HOSTNAME"
+    hostnamectl set-hostname "$HOSTNAME" 2>/dev/null || hostname "$HOSTNAME"
     
     # 更新 /etc/hosts
-    local primary_ip=$(ip route get 1 | awk '{print $7;exit}')
+    local primary_ip=$(ip route get 1 2>/dev/null | awk '{print $7;exit}' || ip addr show | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' | cut -d'/' -f1)
+    
+    # 清理可能的错误条目
+    sed -i "/^[0-9]*\.[0-9]*\.[0-9]*\.[0-9]*[[:space:]]*$HOSTNAME/d" /etc/hosts 2>/dev/null || true
+    
+    # 添加正确的条目
     if ! grep -q "$HOSTNAME" /etc/hosts; then
         echo "$primary_ip    $HOSTNAME $(echo $HOSTNAME | cut -d. -f1)" >> /etc/hosts
     fi
     
     # 提取域名
     DOMAIN=$(echo "$HOSTNAME" | cut -d. -f2-)
+    
+    # 确保域名有效
+    if [[ -z "$DOMAIN" ]] || [[ "$DOMAIN" == "$HOSTNAME" ]]; then
+        read -p "请输入域名（如 example.com）: " DOMAIN
+    fi
     
     # 更新 mailname
     echo "$HOSTNAME" > /etc/mailname
@@ -280,8 +350,7 @@ check_dns() {
     # 安装 DNS 工具
     if ! command -v dig &> /dev/null; then
         info "安装 DNS 工具..."
-        apt-get update -qq
-        apt-get install -y -qq dnsutils curl > /dev/null 2>&1
+        apt-get install -y dnsutils curl
     fi
     
     # 获取服务器公网 IP
@@ -312,7 +381,8 @@ check_dns() {
         echo "----------------------------------------"
         
         if ! confirm "DNS 记录设置完成后继续？"; then
-            error_exit "请先配置 DNS 记录"
+            info "您可以稍后再运行此脚本"
+            exit 0
         fi
     elif [[ "$DNS_IP" != "$SERVER_IP" ]]; then
         warning "DNS 解析不匹配！"
@@ -320,25 +390,16 @@ check_dns() {
         echo "服务器 IP:  $SERVER_IP"
         
         if ! confirm "DNS 配置可能有误，是否继续？"; then
-            error_exit "请先修正 DNS 配置"
+            info "请先修正 DNS 配置"
+            exit 0
         fi
     else
         success "DNS A 记录正确"
     fi
-    
-    # 检查 MX 记录
-    info "检查 MX 记录..."
-    MX_RECORD=$(dig +short MX "$DOMAIN" 2>/dev/null | awk '{print $2}' | head -n1 | sed 's/\.$//')
-    
-    if [[ "$MX_RECORD" == "$HOSTNAME" ]]; then
-        success "MX 记录已正确配置"
-    else
-        warning "建议配置 MX 记录指向 $HOSTNAME"
-    fi
 }
 
 # ============================================================================
-# 安装必要软件包
+# 安装必要软件包（改进版）
 # ============================================================================
 
 install_packages() {
@@ -346,45 +407,88 @@ install_packages() {
     print_color "$PURPLE" "  安装软件包"
     print_color "$PURPLE" "========================================"
     
-    info "更新软件源..."
-    apt-get update -qq
+    # 清理可能的问题
+    cleanup_existing_installation
     
-    # 软件包列表
-    local packages=(
-        "postfix"
-        "dovecot-imapd"
-        "dovecot-pop3d"
-        "dovecot-lmtpd"
-        "dovecot-mysql"
-        "certbot"
-        "opendkim"
-        "opendkim-tools"
-        "spamassassin"
-        "spamc"
-        "fail2ban"
-        "ufw"
-        "mailutils"
-        "dnsutils"
-        "curl"
-        "wget"
-        "git"
-    )
-    
-    # 预配置 Postfix
+    # 预配置 Postfix 避免交互式安装
     echo "postfix postfix/mailname string $HOSTNAME" | debconf-set-selections
     echo "postfix postfix/main_mailer_type select Internet Site" | debconf-set-selections
     
-    # 安装软件包
-    local total=${#packages[@]}
-    local current=0
+    # 基础软件包
+    info "安装基础工具..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        curl \
+        wget \
+        gnupg \
+        lsb-release \
+        ca-certificates \
+        apt-transport-https \
+        software-properties-common \
+        dnsutils \
+        net-tools \
+        || warning "部分基础工具安装失败"
     
-    for package in "${packages[@]}"; do
-        current=$((current + 1))
-        show_progress $current $total
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$package" > /dev/null 2>&1 || {
-            warning "安装 $package 失败，跳过..."
-        }
-    done
+    # Postfix - 特殊处理
+    info "安装 Postfix..."
+    if dpkg -l | grep -q "^ii.*postfix"; then
+        info "Postfix 已安装，重新配置..."
+        # 确保配置正确
+        postconf -e "myhostname = $HOSTNAME"
+        postconf -e "mydomain = $DOMAIN"
+        postconf -e "myorigin = \$mydomain"
+        postconf -e "mydestination = \$myhostname, localhost.\$mydomain, localhost"
+        newaliases
+    else
+        # 新安装
+        DEBIAN_FRONTEND=noninteractive apt-get install -y postfix
+        if [ $? -ne 0 ]; then
+            warning "Postfix 安装失败，尝试修复..."
+            # 手动配置
+            postconf -e "myhostname = $HOSTNAME"
+            postconf -e "mydomain = $DOMAIN"
+            postconf -e "myorigin = \$mydomain"
+            postconf -e "mydestination = \$myhostname, localhost.\$mydomain, localhost"
+            newaliases 2>/dev/null || true
+            dpkg --configure postfix
+        fi
+    fi
+    
+    # Dovecot
+    info "安装 Dovecot..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        dovecot-core \
+        dovecot-imapd \
+        dovecot-pop3d \
+        dovecot-lmtpd \
+        || warning "部分 Dovecot 组件安装失败"
+    
+    # SSL 证书
+    info "安装 Certbot..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y certbot \
+        || warning "Certbot 安装失败，将使用自签名证书"
+    
+    # DKIM
+    info "安装 OpenDKIM..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y opendkim opendkim-tools \
+        || warning "OpenDKIM 安装失败"
+    
+    # 反垃圾邮件
+    info "安装 SpamAssassin..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y spamassassin spamc \
+        || warning "SpamAssassin 安装失败"
+    
+    # 安全工具
+    info "安装安全工具..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban ufw \
+        || warning "部分安全工具安装失败"
+    
+    # 邮件工具
+    info "安装邮件工具..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y mailutils \
+        || warning "邮件工具安装失败"
+    
+    # 最终检查
+    dpkg --configure -a
     
     success "软件包安装完成"
 }
@@ -397,6 +501,13 @@ configure_ssl() {
     print_color "$PURPLE" "\n========================================"
     print_color "$PURPLE" "  SSL 证书配置"
     print_color "$PURPLE" "========================================"
+    
+    # 检查是否安装了 certbot
+    if ! command -v certbot &> /dev/null; then
+        warning "Certbot 未安装，使用自签名证书"
+        create_self_signed_cert
+        return
+    fi
     
     read -p "请输入用于接收证书通知的邮箱地址: " ADMIN_EMAIL
     
@@ -455,7 +566,7 @@ create_self_signed_cert() {
 }
 
 # ============================================================================
-# 配置 Postfix
+# 配置 Postfix（修正版）
 # ============================================================================
 
 configure_postfix() {
@@ -466,7 +577,13 @@ configure_postfix() {
     info "配置 Postfix 主配置文件..."
     
     # 备份原配置
-    cp /etc/postfix/main.cf /etc/postfix/main.cf.backup
+    cp /etc/postfix/main.cf /etc/postfix/main.cf.backup 2>/dev/null || true
+    
+    # 确保主机名和域名配置正确
+    postconf -e "myhostname = $HOSTNAME"
+    postconf -e "mydomain = $DOMAIN"
+    postconf -e "myorigin = \$mydomain"
+    postconf -e "mydestination = localhost.\$mydomain, localhost"
     
     # 生成主配置文件
     cat > /etc/postfix/main.cf << EOF
@@ -482,7 +599,7 @@ append_dot_mydomain = no
 readme_directory = no
 compatibility_level = 3.6
 
-# 服务器标识
+# 服务器标识 - 关键配置
 myhostname = $HOSTNAME
 mydomain = $DOMAIN
 myorigin = \$mydomain
@@ -499,10 +616,7 @@ smtpd_tls_key_file = $SSL_KEY
 smtpd_use_tls = yes
 smtpd_tls_security_level = may
 smtpd_tls_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1
-smtpd_tls_ciphers = high
-smtpd_tls_mandatory_ciphers = high
 smtp_tls_security_level = may
-smtp_tls_note_starttls_offer = yes
 smtpd_tls_received_header = yes
 smtpd_tls_session_cache_database = btree:\${data_directory}/smtpd_scache
 smtp_tls_session_cache_database = btree:\${data_directory}/smtp_scache
@@ -533,45 +647,24 @@ recipient_delimiter = +
 # SMTP 限制
 smtpd_helo_required = yes
 disable_vrfy_command = yes
-strict_rfc821_envelopes = yes
-invalid_hostname_reject_code = 550
-non_fqdn_reject_code = 550
 
 # 接收限制
 smtpd_recipient_restrictions =
     permit_mynetworks,
     permit_sasl_authenticated,
-    reject_non_fqdn_hostname,
-    reject_non_fqdn_sender,
-    reject_non_fqdn_recipient,
     reject_unauth_destination,
-    reject_unauth_pipelining,
     reject_invalid_hostname,
-    reject_unknown_recipient_domain,
-    reject_rbl_client zen.spamhaus.org,
-    reject_rbl_client bl.spamcop.net,
-    permit
+    reject_unknown_recipient_domain
 
 smtpd_sender_restrictions =
     permit_mynetworks,
     permit_sasl_authenticated,
     reject_non_fqdn_sender,
-    reject_unknown_sender_domain,
-    permit
-
-smtpd_helo_restrictions =
-    permit_mynetworks,
-    permit_sasl_authenticated,
-    reject_invalid_helo_hostname,
-    reject_non_fqdn_helo_hostname,
-    reject_unknown_helo_hostname,
-    permit
+    reject_unknown_sender_domain
 
 # 发送速率限制
 smtpd_client_connection_rate_limit = 10
-smtpd_client_connection_count_limit = 10
 smtpd_client_message_rate_limit = 30
-smtpd_client_recipient_rate_limit = 100
 anvil_rate_time_unit = 60s
 
 # 错误处理
@@ -582,27 +675,33 @@ smtpd_hard_error_limit = 20
 # 队列设置
 maximal_queue_lifetime = 3d
 bounce_queue_lifetime = 1d
-maximal_backoff_time = 4000s
-minimal_backoff_time = 300s
 queue_run_delay = 300s
 
 # 性能优化
 default_process_limit = 100
-smtp_connection_cache_on_demand = yes
-smtp_connection_cache_time_limit = 2s
-smtp_connection_cache_reuse_limit = 10
+EOF
 
-# DKIM 集成（稍后配置）
+    # 检查是否安装了 OpenDKIM
+    if command -v opendkim &> /dev/null; then
+        cat >> /etc/postfix/main.cf << EOF
+
+# DKIM 集成
 milter_protocol = 6
 milter_default_action = accept
 smtpd_milters = inet:localhost:8891
 non_smtpd_milters = inet:localhost:8891
 EOF
+    fi
+    
+    # 生成别名数据库
+    newaliases
     
     # 配置 master.cf
     info "配置 Postfix master.cf..."
     
-    cat >> /etc/postfix/master.cf << 'EOF'
+    # 检查是否已存在配置，避免重复
+    if ! grep -q "^submission" /etc/postfix/master.cf; then
+        cat >> /etc/postfix/master.cf << 'EOF'
 
 # Submission 端口配置 (587)
 submission inet n       -       y       -       -       smtpd
@@ -625,6 +724,7 @@ smtps inet n       -       y       -       -       smtpd
   -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
   -o milter_macro_daemon_name=ORIGINATING
 EOF
+    fi
     
     # 创建虚拟用户映射
     info "创建虚拟用户映射..."
@@ -633,7 +733,6 @@ EOF
     
     cat > /etc/postfix/virtual_mailboxes << EOF
 # 虚拟邮箱映射
-# 格式: email@domain    domain/username/
 admin@$DOMAIN       $DOMAIN/admin/
 service@$DOMAIN     $DOMAIN/service/
 support@$DOMAIN     $DOMAIN/support/
@@ -643,7 +742,6 @@ EOF
     
     cat > /etc/postfix/virtual_aliases << EOF
 # 虚拟别名映射
-# 格式: alias@domain    real@domain
 postmaster@$DOMAIN  admin@$DOMAIN
 webmaster@$DOMAIN   admin@$DOMAIN
 root@$DOMAIN        admin@$DOMAIN
@@ -652,6 +750,9 @@ EOF
     # 生成映射数据库
     postmap /etc/postfix/virtual_mailboxes
     postmap /etc/postfix/virtual_aliases
+    
+    # 重启 Postfix
+    systemctl restart postfix
     
     success "Postfix 配置完成"
 }
@@ -718,7 +819,6 @@ ssl_cert = <$SSL_CERT
 ssl_key = <$SSL_KEY
 ssl_min_protocol = TLSv1.2
 ssl_prefer_server_ciphers = yes
-ssl_cipher_list = HIGH:MEDIUM:!LOW:!SSLv2:!EXP:!aNULL
 EOF
     
     # 配置服务
@@ -732,8 +832,6 @@ service imap-login {
         port = 993
         ssl = yes
     }
-    service_count = 1
-    process_min_avail = 4
 }
 
 service pop3-login {
@@ -782,10 +880,15 @@ EOF
 }
 
 # ============================================================================
-# 配置 DKIM
+# 配置 DKIM（如果安装了）
 # ============================================================================
 
 configure_dkim() {
+    if ! command -v opendkim &> /dev/null; then
+        warning "OpenDKIM 未安装，跳过 DKIM 配置"
+        return
+    fi
+    
     print_color "$PURPLE" "\n========================================"
     print_color "$PURPLE" "  配置 DKIM 邮件签名"
     print_color "$PURPLE" "========================================"
@@ -848,96 +951,11 @@ EOF
     systemctl enable opendkim
     
     # 获取 DKIM 记录
-    DKIM_RECORD=$(cat /etc/opendkim/keys/$DOMAIN/mail.txt | tr -d '\n' | sed 's/.*(\(.*\)).*/\1/' | tr -d ' \t\"')
+    if [[ -f /etc/opendkim/keys/$DOMAIN/mail.txt ]]; then
+        DKIM_RECORD=$(cat /etc/opendkim/keys/$DOMAIN/mail.txt | tr -d '\n' | sed 's/.*(\(.*\)).*/\1/' | tr -d ' \t\"')
+    fi
     
     success "DKIM 配置完成"
-}
-
-# ============================================================================
-# 配置 SpamAssassin
-# ============================================================================
-
-configure_spamassassin() {
-    print_color "$PURPLE" "\n========================================"
-    print_color "$PURPLE" "  配置反垃圾邮件"
-    print_color "$PURPLE" "========================================"
-    
-    info "配置 SpamAssassin..."
-    
-    # 启用 SpamAssassin
-    sed -i 's/ENABLED=0/ENABLED=1/' /etc/default/spamassassin 2>/dev/null || true
-    sed -i 's/CRON=0/CRON=1/' /etc/default/spamassassin 2>/dev/null || true
-    
-    # 配置 SpamAssassin
-    cat > /etc/spamassassin/local.cf << EOF
-# SpamAssassin 配置
-rewrite_header Subject [SPAM]
-report_safe 0
-required_score 5.0
-use_bayes 1
-bayes_auto_learn 1
-bayes_auto_learn_threshold_nonspam 0.1
-bayes_auto_learn_threshold_spam 7.0
-skip_rbl_checks 0
-use_razor2 0
-use_dcc 0
-use_pyzor 0
-EOF
-    
-    # 更新规则
-    sa-update || true
-    
-    # 启动服务
-    systemctl restart spamassassin
-    systemctl enable spamassassin
-    
-    success "SpamAssassin 配置完成"
-}
-
-# ============================================================================
-# 配置 Fail2ban
-# ============================================================================
-
-configure_fail2ban() {
-    print_color "$PURPLE" "\n========================================"
-    print_color "$PURPLE" "  配置防暴力破解"
-    print_color "$PURPLE" "========================================"
-    
-    info "配置 Fail2ban..."
-    
-    # 创建 jail 配置
-    cat > /etc/fail2ban/jail.local << EOF
-[DEFAULT]
-bantime = 3600
-findtime = 600
-maxretry = 5
-destemail = admin@$DOMAIN
-action = %(action_mwl)s
-
-[postfix]
-enabled = true
-port = smtp,ssmtp,submission,submissions
-filter = postfix
-logpath = /var/log/mail.log
-
-[postfix-sasl]
-enabled = true
-port = smtp,ssmtp,submission,submissions
-filter = postfix[mode=auth]
-logpath = /var/log/mail.log
-
-[dovecot]
-enabled = true
-port = pop3,pop3s,imap,imaps
-filter = dovecot
-logpath = /var/log/mail.log
-EOF
-    
-    # 重启 Fail2ban
-    systemctl restart fail2ban
-    systemctl enable fail2ban
-    
-    success "Fail2ban 配置完成"
 }
 
 # ============================================================================
@@ -949,12 +967,12 @@ configure_firewall() {
     print_color "$PURPLE" "  配置防火墙"
     print_color "$PURPLE" "========================================"
     
-    info "配置防火墙规则..."
-    
-    # 检查 UFW 是否安装
     if ! command -v ufw &> /dev/null; then
-        apt-get install -y -qq ufw
+        warning "UFW 未安装，跳过防火墙配置"
+        return
     fi
+    
+    info "配置防火墙规则..."
     
     # 配置防火墙规则
     ufw --force disable
@@ -1019,8 +1037,6 @@ show_help() {
     echo "  delete <用户名>   - 删除邮箱用户"
     echo "  passwd <用户名>   - 修改用户密码"
     echo "  list             - 列出所有用户"
-    echo "  info <用户名>     - 显示用户信息"
-    echo "  quota <用户名>    - 查看邮箱使用量"
     echo ""
     echo "示例:"
     echo "  mailuser add john"
@@ -1130,19 +1146,14 @@ delete_user() {
     sed -i "/^${email}/d" "$POSTFIX_DIR/virtual_mailboxes"
     postmap "$POSTFIX_DIR/virtual_mailboxes"
     
-    # 备份后删除邮箱目录
-    if [ -d "$VMAIL_HOME/$DOMAIN/$username" ]; then
-        tar czf "/tmp/${username}_backup_$(date +%Y%m%d_%H%M%S).tar.gz" \
-            "$VMAIL_HOME/$DOMAIN/$username" 2>/dev/null
-        rm -rf "$VMAIL_HOME/$DOMAIN/$username"
-    fi
+    # 删除邮箱目录
+    rm -rf "$VMAIL_HOME/$DOMAIN/$username"
     
     # 重载服务
     systemctl reload postfix
     systemctl reload dovecot
     
     echo -e "${GREEN}✅ 用户 ${email} 已删除${NC}"
-    echo "备份文件: /tmp/${username}_backup_*.tar.gz"
 }
 
 # 修改密码
@@ -1204,63 +1215,6 @@ list_users() {
     done < "$DOVECOT_USERS"
 }
 
-# 显示用户信息
-show_info() {
-    local username=$1
-    
-    if [ -z "$username" ]; then
-        echo -e "${RED}错误: 请指定用户名${NC}"
-        exit 1
-    fi
-    
-    if ! grep -q "^${username}:" "$DOVECOT_USERS"; then
-        echo -e "${RED}错误: 用户不存在${NC}"
-        exit 1
-    fi
-    
-    local email="${username}@${DOMAIN}"
-    
-    echo "用户信息: ${email}"
-    echo "=================="
-    echo "邮箱地址: ${email}"
-    echo "邮箱路径: $VMAIL_HOME/$DOMAIN/$username/"
-    
-    if [ -d "$VMAIL_HOME/$DOMAIN/$username" ]; then
-        local size=$(du -sh "$VMAIL_HOME/$DOMAIN/$username" 2>/dev/null | cut -f1)
-        echo "使用空间: ${size}"
-        
-        local msg_count=$(find "$VMAIL_HOME/$DOMAIN/$username/Maildir" -type f 2>/dev/null | wc -l)
-        echo "邮件数量: ${msg_count}"
-    fi
-}
-
-# 查看配额
-show_quota() {
-    local username=$1
-    
-    if [ -z "$username" ]; then
-        echo -e "${RED}错误: 请指定用户名${NC}"
-        exit 1
-    fi
-    
-    local email="${username}@${DOMAIN}"
-    
-    if [ -d "$VMAIL_HOME/$DOMAIN/$username" ]; then
-        echo "邮箱使用情况: ${email}"
-        echo "=================="
-        du -sh "$VMAIL_HOME/$DOMAIN/$username" 2>/dev/null
-        echo ""
-        echo "详细信息:"
-        find "$VMAIL_HOME/$DOMAIN/$username/Maildir" -type d -name "cur" -o -name "new" | while read dir; do
-            count=$(ls -1 "$dir" 2>/dev/null | wc -l)
-            dirname=$(basename $(dirname "$dir"))
-            echo "  $dirname: $count 封邮件"
-        done
-    else
-        echo -e "${RED}邮箱目录不存在${NC}"
-    fi
-}
-
 # 主程序
 case "$1" in
     add)
@@ -1275,12 +1229,6 @@ case "$1" in
     list|ls)
         list_users
         ;;
-    info)
-        show_info "$2"
-        ;;
-    quota)
-        show_quota "$2"
-        ;;
     help|-h|--help|"")
         show_help
         ;;
@@ -1293,123 +1241,6 @@ esac
 SCRIPT_EOF
     
     chmod +x /usr/local/bin/mailuser
-    
-    # 创建健康检查脚本
-    cat > /usr/local/bin/mailcheck << 'SCRIPT_EOF'
-#!/bin/bash
-
-# 邮件服务器健康检查脚本
-
-echo "========================================"
-echo "  邮件服务器健康检查"
-echo "  时间: $(date)"
-echo "========================================"
-echo ""
-
-# 颜色定义
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-# 检查服务状态
-echo "[服务状态]"
-for service in postfix dovecot opendkim spamassassin fail2ban; do
-    if systemctl is-active --quiet $service; then
-        echo -e "${GREEN}✅ $service: 运行中${NC}"
-    else
-        echo -e "${RED}❌ $service: 已停止${NC}"
-    fi
-done
-
-# 检查端口监听
-echo ""
-echo "[端口监听]"
-ports=(25:SMTP 587:Submission 465:SMTPS 993:IMAPS 995:POP3S)
-for port_info in "${ports[@]}"; do
-    port=$(echo $port_info | cut -d: -f1)
-    name=$(echo $port_info | cut -d: -f2)
-    
-    if ss -tulpn 2>/dev/null | grep -q ":$port "; then
-        echo -e "${GREEN}✅ 端口 $port ($name): 正常${NC}"
-    else
-        echo -e "${RED}❌ 端口 $port ($name): 未监听${NC}"
-    fi
-done
-
-# 检查邮件队列
-echo ""
-echo "[邮件队列]"
-queue_output=$(postqueue -p 2>/dev/null | tail -1)
-if echo "$queue_output" | grep -q "empty"; then
-    echo -e "${GREEN}✅ 邮件队列: 空${NC}"
-else
-    queue_count=$(echo "$queue_output" | grep -oE '[0-9]+' | head -1)
-    if [ "$queue_count" -gt 100 ]; then
-        echo -e "${RED}❌ 队列邮件: ${queue_count} 封 (积压)${NC}"
-    else
-        echo -e "${YELLOW}⚠️  队列邮件: ${queue_count} 封${NC}"
-    fi
-fi
-
-# 检查磁盘空间
-echo ""
-echo "[磁盘使用]"
-df -h | grep -E '^/dev/' | while read line; do
-    usage=$(echo $line | awk '{print $5}' | sed 's/%//')
-    mount=$(echo $line | awk '{print $6}')
-    
-    if [ "$usage" -gt 90 ]; then
-        echo -e "${RED}❌ ${mount}: ${usage}% 使用 (空间不足)${NC}"
-    elif [ "$usage" -gt 80 ]; then
-        echo -e "${YELLOW}⚠️  ${mount}: ${usage}% 使用${NC}"
-    else
-        echo -e "${GREEN}✅ ${mount}: ${usage}% 使用${NC}"
-    fi
-done
-
-# 检查证书有效期
-echo ""
-echo "[SSL 证书]"
-cert_file="/etc/letsencrypt/live/$(hostname -f)/cert.pem"
-if [ -f "$cert_file" ]; then
-    expiry_date=$(openssl x509 -in "$cert_file" -noout -enddate 2>/dev/null | cut -d= -f2)
-    expiry_timestamp=$(date -d "$expiry_date" +%s 2>/dev/null)
-    current_timestamp=$(date +%s)
-    days_left=$(( (expiry_timestamp - current_timestamp) / 86400 ))
-    
-    if [ "$days_left" -lt 7 ]; then
-        echo -e "${RED}❌ 证书将在 ${days_left} 天后过期！${NC}"
-    elif [ "$days_left" -lt 30 ]; then
-        echo -e "${YELLOW}⚠️  证书将在 ${days_left} 天后过期${NC}"
-    else
-        echo -e "${GREEN}✅ 证书有效期还有 ${days_left} 天${NC}"
-    fi
-else
-    echo -e "${YELLOW}⚠️  使用自签名证书${NC}"
-fi
-
-# 检查最近的错误
-echo ""
-echo "[最近错误] (最近 24 小时)"
-if [ -f /var/log/mail.log ]; then
-    error_count=$(grep -i "error\|fatal\|panic" /var/log/mail.log 2>/dev/null | \
-                  grep "$(date +%b\ %_d)" | wc -l)
-    if [ "$error_count" -gt 0 ]; then
-        echo -e "${YELLOW}⚠️  发现 ${error_count} 个错误${NC}"
-        echo "最近的错误:"
-        grep -i "error\|fatal\|panic" /var/log/mail.log | tail -3
-    else
-        echo -e "${GREEN}✅ 没有发现错误${NC}"
-    fi
-fi
-
-echo ""
-echo "========================================"
-echo "检查完成"
-SCRIPT_EOF
-    
-    chmod +x /usr/local/bin/mailcheck
     
     success "管理工具创建完成"
 }
@@ -1427,15 +1258,15 @@ create_initial_users() {
     
     # 创建 admin 账户
     echo "创建管理员邮箱 (admin@$DOMAIN)"
-    /usr/local/bin/mailuser add admin
+    /usr/local/bin/mailuser add admin || warning "admin 用户创建失败"
     
     # 询问是否创建其他常用账户
     if confirm "是否创建 service@$DOMAIN 客服邮箱？" "Y"; then
-        /usr/local/bin/mailuser add service
+        /usr/local/bin/mailuser add service || warning "service 用户创建失败"
     fi
     
     if confirm "是否创建 noreply@$DOMAIN 系统发信邮箱？" "Y"; then
-        /usr/local/bin/mailuser add noreply
+        /usr/local/bin/mailuser add noreply || warning "noreply 用户创建失败"
     fi
     
     success "初始账户创建完成"
@@ -1448,8 +1279,12 @@ create_initial_users() {
 show_configuration() {
     # 获取服务器信息
     local server_ip=$(curl -s -4 ifconfig.me 2>/dev/null || echo "未知")
-    local dkim_record=$(cat /etc/opendkim/keys/$DOMAIN/mail.txt 2>/dev/null | \
-                       tr -d '\n' | sed 's/.*(\(.*\)).*/\1/' | tr -d ' \t\"')
+    local dkim_record=""
+    
+    if [[ -f /etc/opendkim/keys/$DOMAIN/mail.txt ]]; then
+        dkim_record=$(cat /etc/opendkim/keys/$DOMAIN/mail.txt 2>/dev/null | \
+                     tr -d '\n' | sed 's/.*(\(.*\)).*/\1/' | tr -d ' \t\"')
+    fi
     
     print_color "$GREEN" "\n========================================"
     print_color "$GREEN" "  🎉 邮件服务器安装完成！"
@@ -1479,21 +1314,18 @@ show_configuration() {
     echo "   值:   \"v=spf1 mx a ip4:$server_ip ~all\""
     echo ""
     
-    echo "4️⃣  DKIM 记录:"
-    echo "   类型: TXT"
-    echo "   名称: mail._domainkey"
-    echo "   值:   \"$dkim_record\""
-    echo ""
+    if [[ -n "$dkim_record" ]]; then
+        echo "4️⃣  DKIM 记录:"
+        echo "   类型: TXT"
+        echo "   名称: mail._domainkey"
+        echo "   值:   \"$dkim_record\""
+        echo ""
+    fi
     
     echo "5️⃣  DMARC 记录:"
     echo "   类型: TXT"
     echo "   名称: _dmarc"
-    echo "   值:   \"v=DMARC1; p=quarantine; rua=mailto:admin@$DOMAIN; ruf=mailto:admin@$DOMAIN; fo=1\""
-    echo ""
-    
-    echo "6️⃣  PTR 记录 (反向 DNS):"
-    echo "   联系您的 VPS/ISP 提供商设置"
-    echo "   IP: $server_ip 指向 $HOSTNAME"
+    echo "   值:   \"v=DMARC1; p=quarantine; rua=mailto:admin@$DOMAIN\""
     echo ""
     
     print_color "$BLUE" "📧 邮箱账户"
@@ -1507,9 +1339,6 @@ show_configuration() {
     echo "  mailuser passwd <用户名>  - 修改密码"
     echo "  mailuser delete <用户名>  - 删除邮箱"
     echo "  mailuser list            - 查看所有邮箱"
-    echo ""
-    echo "健康检查:"
-    echo "  mailcheck                - 检查服务状态"
     echo ""
     
     print_color "$BLUE" "📱 客户端配置"
@@ -1527,17 +1356,6 @@ show_configuration() {
     echo "  安全: STARTTLS 或 SSL/TLS"
     echo "  需要认证: 是"
     echo "  用户名: 完整邮箱地址"
-    echo ""
-    
-    print_color "$BLUE" "📚 日志文件"
-    echo "邮件日志: /var/log/mail.log"
-    echo "安装日志: $LOG_FILE"
-    echo ""
-    
-    print_color "$BLUE" "🔍 测试工具"
-    echo "测试邮件服务器配置:"
-    echo "  https://www.mail-tester.com/"
-    echo "  https://mxtoolbox.com/"
     echo ""
     
     print_color "$GREEN" "安装成功！请配置 DNS 记录后开始使用。"
@@ -1562,6 +1380,8 @@ main() {
     
     # 执行安装步骤
     check_requirements
+    fix_apt_sources
+    cleanup_existing_installation
     create_backup
     configure_hostname
     check_dns
@@ -1570,14 +1390,17 @@ main() {
     configure_postfix
     configure_dovecot
     configure_dkim
-    configure_spamassassin
-    configure_fail2ban
     configure_firewall
     create_management_tools
     
     # 重启所有服务
     info "重启邮件服务..."
-    systemctl restart postfix dovecot opendkim spamassassin fail2ban
+    systemctl restart postfix || warning "Postfix 重启失败"
+    systemctl restart dovecot || warning "Dovecot 重启失败"
+    
+    if command -v opendkim &> /dev/null; then
+        systemctl restart opendkim || warning "OpenDKIM 重启失败"
+    fi
     
     # 创建初始用户
     create_initial_users
@@ -1592,11 +1415,10 @@ main() {
 安装时间: $(date)
 主机名: $HOSTNAME
 域名: $DOMAIN
-服务器 IP: $SERVER_IP
+服务器 IP: ${SERVER_IP:-未知}
 
 管理命令:
 - mailuser: 邮箱用户管理
-- mailcheck: 健康检查
 
 日志位置:
 - 邮件日志: /var/log/mail.log
@@ -1611,65 +1433,10 @@ EOF
 }
 
 # ============================================================================
-# 错误处理
-# ============================================================================
-
-error_handler() {
-    local line_no=$1
-    local exit_code=$2
-    
-    error_exit "脚本在第 $line_no 行出错，退出码: $exit_code"
-}
-
-trap 'error_handler ${LINENO} $?' ERR
-
-# ============================================================================
 # 脚本入口
 # ============================================================================
 
-# 检查参数
-if [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
-    echo "$SCRIPT_NAME"
-    echo "版本: $SCRIPT_VERSION"
-    echo ""
-    echo "用法: bash $0 [选项]"
-    echo ""
-    echo "选项:"
-    echo "  -h, --help     显示帮助信息"
-    echo "  -v, --version  显示版本信息"
-    echo "  -u, --uninstall 卸载邮件服务器"
-    echo ""
-    echo "更多信息请访问: https://github.com/yourusername/mail-server-setup"
-    exit 0
-fi
-
-if [[ "$1" == "--version" ]] || [[ "$1" == "-v" ]]; then
-    echo "$SCRIPT_VERSION"
-    exit 0
-fi
-
-if [[ "$1" == "--uninstall" ]] || [[ "$1" == "-u" ]]; then
-    print_color "$RED" "卸载邮件服务器"
-    if confirm "确定要卸载邮件服务器吗？这将删除所有配置和邮件数据！"; then
-        info "停止服务..."
-        systemctl stop postfix dovecot opendkim spamassassin fail2ban 2>/dev/null || true
-        
-        info "卸载软件包..."
-        apt-get remove --purge -y postfix dovecot-* opendkim spamassassin fail2ban 2>/dev/null || true
-        
-        info "删除配置文件..."
-        rm -rf /etc/postfix /etc/dovecot /etc/opendkim /var/mail/vhosts
-        
-        success "卸载完成"
-    fi
-    exit 0
-fi
-
-# ============================================================================
-# 脚本入口
-# ============================================================================
-
-# 处理命令行参数
+# 处理参数
 if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
     echo "$SCRIPT_NAME"
     echo "版本: $SCRIPT_VERSION"
@@ -1683,5 +1450,5 @@ if [[ "${1:-}" == "--version" ]] || [[ "${1:-}" == "-v" ]]; then
     exit 0
 fi
 
-# 执行主程序 - 不传递参数
+# 执行主程序
 main
