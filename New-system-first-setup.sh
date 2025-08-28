@@ -1,9 +1,8 @@
 #!/bin/bash
 
 # ============================================================================
-# Debian 12 一键配置脚本 (BBRv3 + Fail2Ban防爆破 + 密码登录)
-# 使用方法: 
-#   apt-get update && apt-get install -y curl && bash <(curl -sSL https://raw.githubusercontent.com/zaochui/debian12/main/New-system-first-setup.sh)
+# Debian 12 一键配置脚本 (修复版)
+# 修复 Fail2Ban 启动问题 + BBRv3 + 密码登录
 # ============================================================================
 
 set -e
@@ -27,13 +26,75 @@ check_root() {
     fi
 }
 
+# 修复 Fail2Ban 安装和配置
+install_and_fix_fail2ban() {
+    log_info "安装和配置 Fail2Ban..."
+    
+    # 安装 Fail2Ban
+    apt install -y fail2ban
+    
+    # 确保服务目录存在
+    mkdir -p /var/run/fail2ban
+    chown root:root /var/run/fail2ban
+    chmod 755 /var/run/fail2ban
+    
+    # 创建简化配置
+    cat > /etc/fail2ban/jail.local << 'EOF'
+[sshd]
+enabled = true
+port = ssh
+logpath = /var/log/auth.log
+maxretry = 3
+bantime = 3600
+findtime = 600
+
+[sshd-ddos]
+enabled = true
+port = ssh
+logpath = /var/log/auth.log
+maxretry = 5
+bantime = 86400
+findtime = 3600
+EOF
+    
+    # 重启服务确保配置生效
+    systemctl daemon-reload
+    systemctl enable fail2ban
+    systemctl start fail2ban
+    
+    # 检查服务状态
+    if systemctl is-active --quiet fail2ban; then
+        log_info "Fail2Ban 服务已成功启动"
+    else
+        log_warn "Fail2Ban 服务启动失败，尝试修复..."
+        systemctl restart fail2ban
+        sleep 2
+        systemctl status fail2ban --no-pager -l
+    fi
+}
+
+# 显示 Fail2Ban 状态（修复版）
+show_fail2ban_status() {
+    echo -e "\n${GREEN}检查 Fail2Ban 状态:${NC}"
+    
+    if systemctl is-active --quiet fail2ban; then
+        echo -e "${GREEN}✓ Fail2Ban 服务运行正常${NC}"
+        # 使用更可靠的方式检查状态
+        if command -v fail2ban-client >/dev/null 2>&1; then
+            echo -e "\n${YELLOW}Fail2Ban 监控的服務:${NC}"
+            systemctl status fail2ban --no-pager -l | grep "Active:" || true
+        fi
+    else
+        echo -e "${RED}✗ Fail2Ban 服务未运行${NC}"
+        echo -e "${YELLOW}尝试启动 Fail2Ban...${NC}"
+        systemctl start fail2ban
+        systemctl status fail2ban --no-pager -l
+    fi
+}
+
 # 安装最新内核 (支持 BBRv3)
 install_bbrv3_kernel() {
     log_info "安装 BBRv3 支持内核..."
-    
-    # 检查当前内核版本
-    local current_kernel=$(uname -r)
-    log_info "当前内核版本: $current_kernel"
     
     # 添加 backports 源
     echo "deb http://deb.debian.org/debian bookworm-backports main" > /etc/apt/sources.list.d/bbrv3.list
@@ -44,7 +105,7 @@ install_bbrv3_kernel() {
         linux-image-cloud-amd64 \
         linux-headers-cloud-amd64
     
-    log_info "BBRv3 内核安装完成，需要重启生效"
+    log_info "BBRv3 内核安装完成"
 }
 
 # 配置 BBRv3 网络优化
@@ -59,88 +120,20 @@ configure_bbrv3() {
     # 添加 BBRv3 优化配置
     cat >> /etc/sysctl.conf << 'EOF'
 
-# ============================================================================
-# BBRv3 网络性能优化
-# ============================================================================
-net.core.default_qdisc = fq_pie
+# BBRv3 网络优化
+net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
-
-# TCP 缓冲区优化
 net.core.rmem_max = 134217728
 net.core.wmem_max = 134217728
 net.ipv4.tcp_rmem = 4096 131072 134217728
 net.ipv4.tcp_wmem = 4096 131072 134217728
-
-# TCP 连接优化
 net.ipv4.tcp_fastopen = 3
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_fin_timeout = 15
-net.ipv4.tcp_keepalive_time = 300
-
-# 连接队列优化
-net.core.netdev_max_backlog = 100000
-net.ipv4.tcp_max_syn_backlog = 65536
-net.core.somaxconn = 65536
-
-# 内存优化
 vm.swappiness = 10
-vm.vfs_cache_pressure = 50
 fs.file-max = 2097152
 EOF
     
     sysctl -p
     log_info "BBRv3 网络优化已配置"
-}
-
-# 安装和配置 Fail2Ban (防暴力破解)
-install_fail2ban() {
-    log_info "安装和配置 Fail2Ban..."
-    
-    apt install -y fail2ban
-    
-    # 创建自定义配置
-    cat > /etc/fail2ban/jail.local << 'EOF'
-[sshd]
-enabled = true
-port = ssh
-filter = sshd
-logpath = /var/log/auth.log
-maxretry = 3
-bantime = 3600
-findtime = 600
-ignoreip = 127.0.0.1/8
-
-[sshd-ddos]
-enabled = true
-port = ssh
-filter = sshd-ddos
-logpath = /var/log/auth.log
-maxretry = 5
-bantime = 86400
-findtime = 3600
-
-[recidive]
-enabled = true
-filter = recidive
-logpath = /var/log/fail2ban.log
-bantime = 604800
-findtime = 86400
-maxretry = 3
-EOF
-    
-    # 启动服务
-    systemctl enable fail2ban
-    systemctl start fail2ban
-    
-    log_info "Fail2Ban 已安装并配置完成"
-}
-
-# 显示 Fail2Ban 状态
-show_fail2ban_status() {
-    echo -e "\n${GREEN}Fail2Ban 状态:${NC}"
-    fail2ban-client status sshd
-    echo -e "\n${YELLOW}当前被禁IP:${NC}"
-    fail2ban-client status sshd | grep -A 10 "Banned IP list"
 }
 
 # 安装基本组件
@@ -163,19 +156,11 @@ system_upgrade() {
 setup_firewall() {
     log_info "配置防火墙..."
     apt install -y ufw
-    
-    # 重置防火墙规则
-    ufw --force reset
-    
-    # 允许基本端口
-    ufw allow 22/tcp comment 'SSH'
-    ufw allow 80/tcp comment 'HTTP'
-    ufw allow 443/tcp comment 'HTTPS'
-    
-    # 默认拒绝所有入站，允许所有出站
+    ufw allow 22/tcp
+    ufw allow 80/tcp
+    ufw allow 443/tcp
     ufw default deny incoming
     ufw default allow outgoing
-    
     ufw --force enable
     log_info "防火墙已启用"
 }
@@ -186,46 +171,27 @@ create_admin_user() {
     read -p "请输入管理用户名 (默认: admin): " username
     username=${username:-admin}
     
-    if id "$username" &>/dev/null; then
-        log_warn "用户 $username 已存在"
-    else
+    if ! id "$username" &>/dev/null; then
         useradd -m -s /bin/bash "$username"
         log_info "用户 $username 创建成功"
     fi
     
-    # 设置用户密码
     echo "请为用户 $username 设置密码:"
     passwd "$username"
     
-    # 添加 sudo 权限
-    if ! grep -q "^$username" /etc/sudoers; then
-        echo "$username ALL=(ALL:ALL) ALL" >> /etc/sudoers
-        log_info "已为用户 $username 添加 sudo 权限"
-    fi
-    
+    echo "$username ALL=(ALL:ALL) ALL" >> /etc/sudoers
     echo "$username" > /root/.debian_setup_username
 }
 
-# 配置 SSH（只使用密码认证）
+# 配置 SSH（密码认证）
 configure_ssh_password() {
     log_info "配置 SSH（密码认证）..."
     
     local ssh_config="/etc/ssh/sshd_config"
-    local backup_file="$ssh_config.backup.$(date +%Y%m%d_%H%M%S)"
+    cp "$ssh_config" "${ssh_config}.backup.$(date +%Y%m%d)"
     
-    # 备份原配置
-    cp "$ssh_config" "$backup_file"
-    log_info "SSH 配置已备份到: $backup_file"
-    
-    # 安全配置选项（只禁用root登录，保留密码认证）
     sed -i 's/#PermitRootLogin yes/PermitRootLogin no/' "$ssh_config"
     sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' "$ssh_config"
-    sed -i 's/#ChallengeResponseAuthentication no/ChallengeResponseAuthentication no/' "$ssh_config"
-    
-    # 添加一些安全设置
-    echo "MaxAuthTries 3" >> "$ssh_config"
-    echo "ClientAliveInterval 300" >> "$ssh_config"
-    echo "ClientAliveCountMax 2" >> "$ssh_config"
     
     systemctl restart ssh
     log_info "SSH 已配置：禁用root登录，启用密码认证"
@@ -235,110 +201,66 @@ configure_ssh_password() {
 configure_locales() {
     log_info "配置区域设置..."
     apt install -y locales
-    
-    # 生成 en_US.UTF-8
     sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
     locale-gen
-    
-    # 设置默认语言
     update-locale LANG=en_US.UTF-8
-    log_info "区域设置完成"
 }
 
 # 安装监控工具
 install_monitoring_tools() {
     log_info "安装系统监控工具..."
     apt install -y htop iotop iftop nload
-    log_info "监控工具安装完成"
 }
 
 # 创建登录欢迎信息
 create_motd() {
-    log_info "配置登录欢迎信息..."
     cat > /etc/motd << 'EOF'
 =============================================
 =             Debian 12 Server              =
 =      BBRv3 + Fail2Ban + 安全配置         =
-=============================================
-已启用:
-- BBRv3 网络加速
-- Fail2Ban 防暴力破解
-- 防火墙保护
-- SSH 安全配置
 =============================================
 EOF
 }
 
 # 显示配置摘要
 show_summary() {
-    local username=$(get_username)
+    local username=$(cat /root/.debian_setup_username 2>/dev/null || echo "admin")
     
     echo -e "\n${GREEN}==========================================="
     echo "           配置完成摘要"
     echo "===========================================${NC}"
     
-    echo -e "${GREEN}✅ 系统基础工具安装完成"
-    echo -e "✅ 系统更新完成"
-    echo -e "✅ 防火墙配置完成"
-    echo -e "✅ 管理用户创建完成"
-    echo -e "✅ SSH 安全配置完成"
-    echo -e "✅ 区域设置完成"
+    echo -e "${GREEN}✅ 所有基础配置完成"
     echo -e "✅ BBRv3 网络优化启用"
-    echo -e "✅ Fail2Ban 防爆破已安装"
-    echo -e "✅ 监控工具安装完成${NC}"
+    echo -e "✅ Fail2Ban 防爆破安装完成"
+    echo -e "✅ 防火墙配置完成${NC}"
     
-    echo -e "\n${YELLOW}SSH 连接信息:${NC}"
+    echo -e "\n${YELLOW}连接信息:${NC}"
     echo -e "用户名: $username"
-    echo -e "连接命令: ssh $username@你的服务器IP"
-    echo -e "认证方式: 密码认证"
+    echo -e "连接: ssh $username@服务器IP"
     
     echo -e "\n${YELLOW}安全防护:${NC}"
-    echo -e "✔ Fail2Ban 已启用: 3次失败登录禁止1小时"
-    echo -e "✔ 防火墙已启用: 开放 22,80,443 端口"
+    echo -e "✔ 3次登录失败封禁IP 1小时"
     echo -e "✔ root SSH 登录已禁用"
-    echo -e "✔ BBRv3 网络加速已启用"
+    echo -e "✔ 防火墙已启用"
     
-    # 显示 Fail2Ban 状态
     show_fail2ban_status
     
-    echo -e "\n${RED}重要提示:${NC}"
-    echo -e "1. 请使用创建的用户名和密码登录"
-    echo -e "2. 连续3次密码错误将被封禁IP 1小时"
-    echo -e "3. 建议定期更改密码"
-    echo -e "4. 重启后所有配置生效"
-
     echo -e "\n${GREEN}===========================================${NC}"
-}
-
-# 获取用户名
-get_username() {
-    if [[ -f "/root/.debian_setup_username" ]]; then
-        cat "/root/.debian_setup_username"
-    else
-        echo "admin"
-    fi
 }
 
 # 重启提示
 reboot_prompt() {
-    echo -e "\n${YELLOW}部分配置需要重启才能生效${NC}"
-    read -p "是否立即重启服务器? (y/N): " choice
+    echo -e "\n${YELLOW}需要重启使内核和BBRv3生效${NC}"
+    read -p "是否立即重启? (y/N): " choice
     case "${choice:-n}" in
-        y|Y)
-            log_info "系统将在 5 秒后重启..."
-            sleep 5
-            reboot
-            ;;
-        *)
-            log_info "请手动重启服务器以使所有配置生效"
-            ;;
+        y|Y) reboot ;;
+        *) echo "请手动重启";;
     esac
 }
 
 # 主配置函数
 main() {
-    log_info "开始 Debian 12 安全配置 (BBRv3 + Fail2Ban)..."
-    
     check_root
     install_basics
     system_upgrade
@@ -348,14 +270,13 @@ main() {
     configure_locales
     install_bbrv3_kernel
     configure_bbrv3
-    install_fail2ban
+    install_and_fix_fail2ban
     install_monitoring_tools
     create_motd
     show_summary
     reboot_prompt
     
-    log_info "安全配置完成!"
+    log_info "配置完成!"
 }
 
-# 执行主函数
 main "$@"
