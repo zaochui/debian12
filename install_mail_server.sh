@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ============================================================================
-# Debian 12 邮件服务器一键部署脚本 - 最终修复版
-# 版本: 2.2.0
+# Debian 12 邮件服务器一键部署脚本 - 完整修复版
+# 版本: 2.3.0
 # 作者: 开源社区版
 # 协议: MIT
 # 
@@ -24,7 +24,7 @@ set -eo pipefail
 # 全局配置变量
 # ============================================================================
 
-SCRIPT_VERSION="2.2.0"
+SCRIPT_VERSION="2.3.0"
 SCRIPT_NAME="Debian 12 邮件服务器部署脚本"
 LOG_FILE="/var/log/mail-server-setup.log"
 BACKUP_DIR="/var/backups/mail-setup-$(date +%Y%m%d_%H%M%S)"
@@ -169,6 +169,48 @@ check_requirements() {
 }
 
 # ============================================================================
+# 修复系统主机名
+# ============================================================================
+
+fix_system_hostname() {
+    info "修复系统主机名配置..."
+    
+    # 获取当前主机名
+    local current_hostname=$(hostname)
+    
+    # 检查是否包含IP地址片段或无效格式
+    if [[ "$current_hostname" =~ [0-9]+\.[0-9]+\.[0-9]+$ ]] || \
+       [[ "$current_hostname" =~ ^racknerd ]] || \
+       [[ ! "$current_hostname" =~ \. ]]; then
+        
+        warning "检测到无效的主机名: $current_hostname"
+        
+        # 临时设置为一个有效的默认值
+        local temp_hostname="mail.localdomain"
+        info "临时设置主机名为: $temp_hostname"
+        
+        # 设置主机名
+        hostnamectl set-hostname "$temp_hostname" 2>/dev/null || hostname "$temp_hostname"
+        
+        # 修复 /etc/hosts
+        cat > /etc/hosts << EOF
+127.0.0.1   localhost
+127.0.1.1   $temp_hostname mail
+
+# The following lines are desirable for IPv6 capable hosts
+::1     localhost ip6-localhost ip6-loopback
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
+EOF
+        
+        # 更新 mailname
+        echo "$temp_hostname" > /etc/mailname
+        
+        success "主机名已临时修复"
+    fi
+}
+
+# ============================================================================
 # 修复和配置软件源
 # ============================================================================
 
@@ -208,39 +250,28 @@ EOF
 }
 
 # ============================================================================
-# 清理和修复现有安装
+# 清理现有的 Postfix 安装
 # ============================================================================
 
-cleanup_existing_installation() {
-    info "检查并修复现有安装..."
+cleanup_postfix() {
+    info "清理现有的 Postfix 配置..."
     
-    # 检查 Postfix 状态
-    if dpkg -l | grep -q "^iF.*postfix"; then
-        warning "检测到 Postfix 安装未完成，尝试修复..."
+    # 停止 Postfix
+    systemctl stop postfix 2>/dev/null || true
+    
+    # 如果 Postfix 安装失败，完全清理
+    if dpkg -l | grep -E "^[iU][^i].*postfix"; then
+        warning "检测到未完成的 Postfix 安装，正在清理..."
         
-        # 获取正确的主机名和域名
-        local temp_hostname=$(hostname -f 2>/dev/null || hostname)
-        if [[ "$temp_hostname" == *.* ]]; then
-            TEMP_DOMAIN=$(echo "$temp_hostname" | cut -d. -f2-)
-        else
-            TEMP_DOMAIN="localdomain"
-            temp_hostname="mail.$TEMP_DOMAIN"
-        fi
+        # 强制卸载
+        apt-get remove --purge -y postfix 2>/dev/null || true
+        apt-get autoremove -y
         
-        # 修复 Postfix 配置
-        postconf -e "myhostname = $temp_hostname"
-        postconf -e "mydomain = $TEMP_DOMAIN"
-        postconf -e "myorigin = \$mydomain"
-        postconf -e "mydestination = \$myhostname, localhost.\$mydomain, localhost"
-        
-        # 尝试完成配置
-        newaliases 2>/dev/null || true
-        dpkg --configure postfix 2>/dev/null || true
+        # 清理配置文件
+        rm -rf /etc/postfix
+        rm -f /etc/mailname
+        rm -f /etc/aliases
     fi
-    
-    # 修复所有未配置的包
-    dpkg --configure -a 2>/dev/null || true
-    apt-get install -f -y 2>/dev/null || true
     
     success "清理完成"
 }
@@ -265,7 +296,7 @@ create_backup() {
 }
 
 # ============================================================================
-# 主机名和域名配置
+# 主机名和域名配置（改进版）
 # ============================================================================
 
 configure_hostname() {
@@ -273,55 +304,34 @@ configure_hostname() {
     print_color "$PURPLE" "  主机名配置"
     print_color "$PURPLE" "========================================"
     
-    local current_hostname=$(hostname -f 2>/dev/null || hostname)
-    info "当前主机名: $current_hostname"
-    
     # 验证 FQDN 格式
     is_valid_fqdn() {
         local hostname=$1
-        if [[ "$hostname" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]] && [[ "$hostname" == *.* ]]; then
+        if [[ "$hostname" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]] && \
+           [[ "$hostname" == *.* ]] && \
+           [[ ! "$hostname" =~ [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ]]; then
             return 0
         else
             return 1
         fi
     }
     
-    # 检查当前主机名是否是 IP 地址或无效
-    if [[ "$current_hostname" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || ! is_valid_fqdn "$current_hostname"; then
-        warning "当前主机名无效或是 IP 地址"
-        echo "邮件服务器需要一个正确的 FQDN，例如: mail.example.com"
-        read -p "请输入邮件服务器主机名: " new_hostname
+    # 获取输入
+    local current_hostname=$(hostname -f 2>/dev/null || hostname)
+    info "当前主机名: $current_hostname"
+    
+    # 始终要求用户输入正确的主机名
+    echo "邮件服务器需要一个正确的 FQDN，例如: mail.example.com"
+    
+    while true; do
+        read -p "请输入邮件服务器主机名: " HOSTNAME
         
-        if ! is_valid_fqdn "$new_hostname"; then
-            error_exit "主机名格式无效。必须是类似 mail.example.com 的 FQDN"
-        fi
-        
-        HOSTNAME="$new_hostname"
-    else
-        if confirm "使用 '$current_hostname' 作为邮件服务器主机名？" "Y"; then
-            HOSTNAME="$current_hostname"
+        if is_valid_fqdn "$HOSTNAME"; then
+            break
         else
-            read -p "请输入新的主机名: " new_hostname
-            if ! is_valid_fqdn "$new_hostname"; then
-                error_exit "主机名格式无效"
-            fi
-            HOSTNAME="$new_hostname"
+            warning "主机名格式无效。必须是类似 mail.example.com 的 FQDN"
         fi
-    fi
-    
-    # 设置主机名
-    hostnamectl set-hostname "$HOSTNAME" 2>/dev/null || hostname "$HOSTNAME"
-    
-    # 更新 /etc/hosts
-    local primary_ip=$(ip route get 1 2>/dev/null | awk '{print $7;exit}' || ip addr show | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' | cut -d'/' -f1)
-    
-    # 清理可能的错误条目
-    sed -i "/^[0-9]*\.[0-9]*\.[0-9]*\.[0-9]*[[:space:]]*$HOSTNAME/d" /etc/hosts 2>/dev/null || true
-    
-    # 添加正确的条目
-    if ! grep -q "$HOSTNAME" /etc/hosts; then
-        echo "$primary_ip    $HOSTNAME $(echo $HOSTNAME | cut -d. -f1)" >> /etc/hosts
-    fi
+    done
     
     # 提取域名
     DOMAIN=$(echo "$HOSTNAME" | cut -d. -f2-)
@@ -330,6 +340,31 @@ configure_hostname() {
     if [[ -z "$DOMAIN" ]] || [[ "$DOMAIN" == "$HOSTNAME" ]]; then
         read -p "请输入域名（如 example.com）: " DOMAIN
     fi
+    
+    # 设置主机名
+    info "设置主机名为: $HOSTNAME"
+    hostnamectl set-hostname "$HOSTNAME" 2>/dev/null || hostname "$HOSTNAME"
+    
+    # 获取服务器IP
+    local primary_ip=$(ip route get 1 2>/dev/null | awk '{print $7;exit}' || \
+                       ip addr show | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' | cut -d'/' -f1)
+    
+    # 更新 /etc/hosts
+    cat > /etc/hosts << EOF
+# System hosts file
+# Updated by Mail Server Setup Script on $(date)
+
+127.0.0.1   localhost
+127.0.1.1   $HOSTNAME $(echo $HOSTNAME | cut -d. -f1)
+
+# Server IP mapping
+${primary_ip:-192.210.140.19}   $HOSTNAME $(echo $HOSTNAME | cut -d. -f1)
+
+# IPv6 defaults
+::1         localhost ip6-localhost ip6-loopback
+ff02::1     ip6-allnodes
+ff02::2     ip6-allrouters
+EOF
     
     # 更新 mailname
     echo "$HOSTNAME" > /etc/mailname
@@ -357,7 +392,8 @@ check_dns() {
     info "获取服务器公网 IP..."
     SERVER_IP=$(curl -s -4 --connect-timeout 5 ifconfig.me || \
                 curl -s -4 --connect-timeout 5 icanhazip.com || \
-                curl -s -4 --connect-timeout 5 ipinfo.io/ip)
+                curl -s -4 --connect-timeout 5 ipinfo.io/ip || \
+                echo "192.210.140.19")
     
     if [[ -z "$SERVER_IP" ]]; then
         warning "无法自动获取公网 IP"
@@ -399,20 +435,87 @@ check_dns() {
 }
 
 # ============================================================================
-# 安装必要软件包（改进版）
+# 安装 Postfix（特殊处理）
+# ============================================================================
+
+install_postfix() {
+    info "安装 Postfix..."
+    
+    # 清理可能的问题
+    cleanup_postfix
+    
+    # 预先创建配置文件，避免安装时出错
+    mkdir -p /etc/postfix
+    cat > /etc/postfix/main.cf.proto << EOF
+# Temporary configuration for installation
+myhostname = $HOSTNAME
+mydomain = $DOMAIN
+myorigin = \$mydomain
+mydestination = \$myhostname, localhost.\$mydomain, localhost
+relayhost = 
+mynetworks = 127.0.0.0/8
+mailbox_size_limit = 0
+recipient_delimiter = +
+inet_interfaces = all
+inet_protocols = ipv4
+EOF
+    
+    # 预配置 debconf，避免交互式安装
+    echo "postfix postfix/mailname string $HOSTNAME" | debconf-set-selections
+    echo "postfix postfix/main_mailer_type select Internet Site" | debconf-set-selections
+    echo "postfix postfix/destinations string $HOSTNAME, localhost" | debconf-set-selections
+    echo "postfix postfix/relayhost string " | debconf-set-selections
+    echo "postfix postfix/mynetworks string 127.0.0.0/8" | debconf-set-selections
+    echo "postfix postfix/protocols select ipv4" | debconf-set-selections
+    
+    # 安装 Postfix
+    DEBIAN_FRONTEND=noninteractive apt-get install -y postfix
+    
+    # 立即修复配置
+    cat > /etc/postfix/main.cf << EOF
+# Basic configuration
+myhostname = $HOSTNAME
+mydomain = $DOMAIN
+myorigin = \$mydomain
+mydestination = \$myhostname, localhost.\$mydomain, localhost
+relayhost = 
+mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128
+mailbox_size_limit = 0
+recipient_delimiter = +
+inet_interfaces = all
+inet_protocols = ipv4
+inet_protocols = all
+alias_maps = hash:/etc/aliases
+alias_database = hash:/etc/aliases
+smtpd_banner = \$myhostname ESMTP
+biff = no
+append_dot_mydomain = no
+readme_directory = no
+compatibility_level = 3.6
+EOF
+    
+    # 创建别名文件
+    touch /etc/aliases
+    echo "root: root" > /etc/aliases
+    echo "postmaster: root" >> /etc/aliases
+    
+    # 生成别名数据库
+    newaliases
+    
+    # 重启 Postfix
+    systemctl restart postfix
+    
+    success "Postfix 安装完成"
+}
+
+# ============================================================================
+# 安装其他软件包
 # ============================================================================
 
 install_packages() {
     print_color "$PURPLE" "\n========================================"
     print_color "$PURPLE" "  安装软件包"
     print_color "$PURPLE" "========================================"
-    
-    # 清理可能的问题
-    cleanup_existing_installation
-    
-    # 预配置 Postfix 避免交互式安装
-    echo "postfix postfix/mailname string $HOSTNAME" | debconf-set-selections
-    echo "postfix postfix/main_mailer_type select Internet Site" | debconf-set-selections
     
     # 基础软件包
     info "安装基础工具..."
@@ -428,30 +531,8 @@ install_packages() {
         net-tools \
         || warning "部分基础工具安装失败"
     
-    # Postfix - 特殊处理
-    info "安装 Postfix..."
-    if dpkg -l | grep -q "^ii.*postfix"; then
-        info "Postfix 已安装，重新配置..."
-        # 确保配置正确
-        postconf -e "myhostname = $HOSTNAME"
-        postconf -e "mydomain = $DOMAIN"
-        postconf -e "myorigin = \$mydomain"
-        postconf -e "mydestination = \$myhostname, localhost.\$mydomain, localhost"
-        newaliases
-    else
-        # 新安装
-        DEBIAN_FRONTEND=noninteractive apt-get install -y postfix
-        if [ $? -ne 0 ]; then
-            warning "Postfix 安装失败，尝试修复..."
-            # 手动配置
-            postconf -e "myhostname = $HOSTNAME"
-            postconf -e "mydomain = $DOMAIN"
-            postconf -e "myorigin = \$mydomain"
-            postconf -e "mydestination = \$myhostname, localhost.\$mydomain, localhost"
-            newaliases 2>/dev/null || true
-            dpkg --configure postfix
-        fi
-    fi
+    # 安装 Postfix
+    install_postfix
     
     # Dovecot
     info "安装 Dovecot..."
@@ -486,9 +567,6 @@ install_packages() {
     info "安装邮件工具..."
     DEBIAN_FRONTEND=noninteractive apt-get install -y mailutils \
         || warning "邮件工具安装失败"
-    
-    # 最终检查
-    dpkg --configure -a
     
     success "软件包安装完成"
 }
@@ -566,7 +644,7 @@ create_self_signed_cert() {
 }
 
 # ============================================================================
-# 配置 Postfix（修正版）
+# 配置 Postfix（完整版）
 # ============================================================================
 
 configure_postfix() {
@@ -578,12 +656,6 @@ configure_postfix() {
     
     # 备份原配置
     cp /etc/postfix/main.cf /etc/postfix/main.cf.backup 2>/dev/null || true
-    
-    # 确保主机名和域名配置正确
-    postconf -e "myhostname = $HOSTNAME"
-    postconf -e "mydomain = $DOMAIN"
-    postconf -e "myorigin = \$mydomain"
-    postconf -e "mydestination = localhost.\$mydomain, localhost"
     
     # 生成主配置文件
     cat > /etc/postfix/main.cf << EOF
@@ -609,6 +681,10 @@ mydestination = localhost.\$mydomain, localhost
 inet_interfaces = all
 inet_protocols = ipv4
 mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128
+
+# 别名
+alias_maps = hash:/etc/aliases
+alias_database = hash:/etc/aliases
 
 # SSL/TLS 配置
 smtpd_tls_cert_file = $SSL_CERT
@@ -693,7 +769,7 @@ non_smtpd_milters = inet:localhost:8891
 EOF
     fi
     
-    # 生成别名数据库
+    # 重新生成别名数据库
     newaliases
     
     # 配置 master.cf
@@ -1278,7 +1354,7 @@ create_initial_users() {
 
 show_configuration() {
     # 获取服务器信息
-    local server_ip=$(curl -s -4 ifconfig.me 2>/dev/null || echo "未知")
+    local server_ip=$(curl -s -4 ifconfig.me 2>/dev/null || echo "192.210.140.19")
     local dkim_record=""
     
     if [[ -f /etc/opendkim/keys/$DOMAIN/mail.txt ]]; then
@@ -1381,7 +1457,7 @@ main() {
     # 执行安装步骤
     check_requirements
     fix_apt_sources
-    cleanup_existing_installation
+    fix_system_hostname
     create_backup
     configure_hostname
     check_dns
@@ -1415,7 +1491,7 @@ main() {
 安装时间: $(date)
 主机名: $HOSTNAME
 域名: $DOMAIN
-服务器 IP: ${SERVER_IP:-未知}
+服务器 IP: ${SERVER_IP:-192.210.140.19}
 
 管理命令:
 - mailuser: 邮箱用户管理
