@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ============================================================================
-# Debian 12 安全配置脚本 - 精简版（无备份）
-# 适用于新服务器的快速安全配置
+# Debian 12 安全配置脚本 - 精简版（仅使用root账号）
+# 适用于需要保持root访问的服务器安全配置
 # ============================================================================
 
 # 确保使用完整PATH
@@ -23,14 +23,11 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_step() { echo -e "\n${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n${MAGENTA}[步骤]${NC} $1\n${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; }
 
 # 全局变量
-HOSTNAME=""
-HOSTNAME_SHORT=""
-ADMIN_USER=""
-ADMIN_PASS=""
 SSH_PORT="22"
 KERNEL_VERSION=""
 HAS_BBR_SUPPORT=false
 SERVER_IP=""
+ROOT_PASS=""
 
 # 检查 root 权限
 check_root() {
@@ -80,55 +77,21 @@ check_system() {
 get_user_input() {
     log_step "配置信息收集"
     
-    # 获取服务器名称
-    current_hostname=$(hostname)
-    log_info "当前服务器名称: $current_hostname"
-    
-    # 询问完整域名
-    read -p "请输入服务器完整域名 (如: mail.zaochui.org): " HOSTNAME
-    if [[ -z "$HOSTNAME" ]]; then
-        HOSTNAME="$current_hostname"
-        log_info "保持当前服务器名称: $HOSTNAME"
-    fi
-    
-    # 提取短名称（第一个点之前的部分）
-    HOSTNAME_SHORT=$(echo "$HOSTNAME" | cut -d. -f1)
-    log_info "短名称: $HOSTNAME_SHORT"
-    log_info "完整域名: $HOSTNAME"
-    
-    # 获取管理员用户名
+    # 获取root新密码
     while true; do
-        read -p "请输入管理员用户名 (不要使用root): " ADMIN_USER
-        if [[ -z "$ADMIN_USER" ]]; then
-            log_error "用户名不能为空"
-        elif [[ "$ADMIN_USER" == "root" ]]; then
-            log_error "不能使用root作为用户名"
-        elif id "$ADMIN_USER" &>/dev/null; then
-            log_warn "用户 $ADMIN_USER 已存在"
-            read -p "是否使用现有用户？(y/N): " -r
-            if [[ $REPLY =~ ^[Yy]$ ]]; then
-                log_info "使用现有用户，需要设置新密码"
-                break
-            fi
-        else
-            break
-        fi
-    done
-    
-    # 获取管理员密码
-    while true; do
-        echo -e "${YELLOW}请设置 $ADMIN_USER 用户的密码:${NC}"
-        read -s -p "输入密码: " ADMIN_PASS
+        echo -e "${YELLOW}请设置root用户的新密码（增强安全性）:${NC}"
+        read -s -p "输入密码: " ROOT_PASS
         echo
-        read -s -p "确认密码: " ADMIN_PASS_CONFIRM
+        read -s -p "确认密码: " ROOT_PASS_CONFIRM
         echo
         
-        if [[ -z "$ADMIN_PASS" ]]; then
-            log_error "密码不能为空"
-        elif [[ "$ADMIN_PASS" != "$ADMIN_PASS_CONFIRM" ]]; then
+        if [[ -z "$ROOT_PASS" ]]; then
+            log_warn "密码为空，跳过密码修改"
+            break
+        elif [[ "$ROOT_PASS" != "$ROOT_PASS_CONFIRM" ]]; then
             log_error "两次输入的密码不一致，请重新输入"
-        elif [[ ${#ADMIN_PASS} -lt 6 ]]; then
-            log_error "密码长度至少需要6个字符"
+        elif [[ ${#ROOT_PASS} -lt 8 ]]; then
+            log_error "密码长度至少需要8个字符"
         else
             log_info "密码设置成功"
             break
@@ -136,17 +99,15 @@ get_user_input() {
     done
     
     # 获取SSH端口
-    read -p "请输入SSH端口 (默认22，建议修改如2222): " input_port
+    read -p "请输入SSH端口 (当前: 22，建议修改如 2222): " input_port
     if [[ -n "$input_port" ]] && [[ "$input_port" =~ ^[0-9]+$ ]] && [ "$input_port" -ge 1 ] && [ "$input_port" -le 65535 ]; then
         SSH_PORT="$input_port"
     fi
     
     echo -e "\n${GREEN}配置信息确认：${NC}"
-    echo -e "  服务器域名: ${YELLOW}$HOSTNAME${NC}"
-    echo -e "  服务器短名: ${YELLOW}$HOSTNAME_SHORT${NC}"
     echo -e "  服务器IP: ${YELLOW}$SERVER_IP${NC}"
-    echo -e "  管理员用户: ${YELLOW}$ADMIN_USER${NC}"
     echo -e "  SSH端口: ${YELLOW}$SSH_PORT${NC}"
+    echo -e "  root密码: ${YELLOW}$([ -n "$ROOT_PASS" ] && echo "将更新" || echo "保持不变")${NC}"
     
     read -p "确认以上信息正确？(Y/n): " -r
     if [[ $REPLY =~ ^[Nn]$ ]]; then
@@ -154,56 +115,28 @@ get_user_input() {
     fi
 }
 
-# 设置服务器名称（改进版）
-set_hostname() {
-    log_step "设置服务器名称"
-    
-    # 设置hostname
-    hostnamectl set-hostname "$HOSTNAME" 2>/dev/null || hostname "$HOSTNAME"
-    
-    # 更新 /etc/hostname
-    echo "$HOSTNAME_SHORT" > /etc/hostname
-    
-    # 完整更新 /etc/hosts 文件
-    log_info "更新 /etc/hosts 文件..."
-    
-    # 创建新的 hosts 文件内容
-    cat > /etc/hosts << EOF
-# System hosts file
-# Updated by Debian Security Setup Script on $(date)
-
-# Localhost entries
-127.0.0.1       localhost localhost.localdomain
-::1             localhost localhost.localdomain
-
-# Hostname entries
-127.0.1.1       $HOSTNAME $HOSTNAME_SHORT
-
-# Server IP mapping
-$SERVER_IP      $HOSTNAME $HOSTNAME_SHORT
-EOF
-    
-    log_info "hosts 文件已更新："
-    cat /etc/hosts
-    
-    # 验证设置
-    log_info "验证主机名设置："
-    log_info "  hostname: $(hostname)"
-    log_info "  hostname -f: $(hostname -f 2>/dev/null || echo '无法解析')"
+# 更新root密码
+update_root_password() {
+    if [ -n "$ROOT_PASS" ]; then
+        log_step "更新root密码"
+        echo "root:$ROOT_PASS" | chpasswd
+        if [ $? -eq 0 ]; then
+            log_info "root密码更新成功"
+        else
+            log_error "密码更新失败"
+        fi
+    fi
 }
 
 # 全量系统更新
 full_system_update() {
-    log_step "执行完整系统更新"
+    log_step "执行系统更新"
     
     log_info "更新软件包列表..."
     apt-get update -y || log_warn "更新软件源时出现警告"
     
-    log_info "升级所有已安装的软件包..."
+    log_info "升级已安装的软件包..."
     DEBIAN_FRONTEND=noninteractive apt-get upgrade -y || log_warn "升级软件包时出现警告"
-    
-    log_info "执行发行版升级..."
-    DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y || log_warn "发行版升级时出现警告"
     
     log_info "清理不需要的软件包..."
     apt-get autoremove --purge -y
@@ -218,21 +151,13 @@ install_packages() {
     
     # 基础工具列表
     local packages=(
-        "sudo"
         "curl"
         "wget"
-        "nano"
-        "vim"
         "htop"
         "net-tools"
         "ufw"
         "fail2ban"
         "unattended-upgrades"
-        "apt-transport-https"
-        "ca-certificates"
-        "gnupg"
-        "lsb-release"
-        "software-properties-common"
         "rsyslog"
     )
     
@@ -243,62 +168,20 @@ install_packages() {
         fi
     done
     
-    # 确保rsyslog运行
-    if command -v rsyslog &>/dev/null; then
-        systemctl restart rsyslog 2>/dev/null || true
-        log_info "rsyslog 服务已启动"
-    fi
-}
-
-# 创建管理用户
-create_admin_user() {
-    log_step "配置管理用户: $ADMIN_USER"
-    
-    # 创建用户（如果不存在）
-    if ! id "$ADMIN_USER" &>/dev/null; then
-        useradd -m -s /bin/bash "$ADMIN_USER"
-        usermod -aG sudo "$ADMIN_USER" 2>/dev/null || true
-        log_info "用户 $ADMIN_USER 创建成功"
-    else
-        log_info "用户 $ADMIN_USER 已存在，更新密码"
-    fi
-    
-    # 设置密码（使用前面收集的密码）
-    echo "$ADMIN_USER:$ADMIN_PASS" | chpasswd
-    if [ $? -eq 0 ]; then
-        log_info "用户密码设置成功"
-    else
-        log_error "密码设置失败，尝试手动设置"
-        passwd "$ADMIN_USER"
-    fi
-    
-    # 配置sudo权限
-    local sudoers_file="/etc/sudoers.d/90-$ADMIN_USER"
-    cat > "$sudoers_file" << EOF
-# Sudo permissions for $ADMIN_USER
-$ADMIN_USER ALL=(ALL:ALL) ALL
-EOF
-    
-    chmod 440 "$sudoers_file"
-    
-    # 验证sudoers配置
-    if visudo -c -f "$sudoers_file" &>/dev/null; then
-        log_info "sudo权限配置成功"
-    else
-        log_error "sudo配置有误，尝试修复..."
-        rm -f "$sudoers_file"
-        echo "$ADMIN_USER ALL=(ALL:ALL) ALL" | EDITOR='tee -a' visudo
-    fi
+    log_info "软件包安装完成"
 }
 
 # 配置SSH安全
 configure_ssh() {
     log_step "配置SSH安全设置"
     
+    # 备份原始配置
+    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup.$(date +%Y%m%d)
+    
     local ssh_config_d="/etc/ssh/sshd_config.d"
     mkdir -p "$ssh_config_d"
     
-    # 创建自定义SSH配置
+    # 创建自定义SSH配置（允许root但增强安全性）
     cat > "$ssh_config_d/99-security.conf" << EOF
 # Custom SSH Security Configuration
 # Generated on $(date)
@@ -309,12 +192,9 @@ Port $SSH_PORT
 # Authentication settings
 PasswordAuthentication yes
 PubkeyAuthentication yes
-PermitRootLogin no
+PermitRootLogin yes
 ChallengeResponseAuthentication no
 UsePAM yes
-
-# User restrictions
-AllowUsers $ADMIN_USER
 
 # Security limits
 MaxAuthTries 3
@@ -341,8 +221,9 @@ EOF
         systemctl restart sshd || systemctl restart ssh
         log_info "SSH服务已重启"
     else
-        log_error "SSH配置有误，保持原配置"
+        log_error "SSH配置有误，恢复原配置"
         rm -f "$ssh_config_d/99-security.conf"
+        cp /etc/ssh/sshd_config.backup.$(date +%Y%m%d) /etc/ssh/sshd_config
     fi
 }
 
@@ -355,13 +236,18 @@ setup_firewall() {
         apt-get install -y ufw
     fi
     
+    # 重置防火墙规则
+    ufw --force reset
+    
     # 先添加SSH端口规则（防止锁定）
     ufw allow "$SSH_PORT/tcp" comment 'SSH' 2>/dev/null || log_warn "SSH端口规则添加失败"
     
     # 如果修改了默认SSH端口，临时保留22端口
     if [[ "$SSH_PORT" != "22" ]]; then
         ufw allow 22/tcp comment 'SSH-Temp' 2>/dev/null || true
-        log_warn "临时保留22端口，确认新端口可用后执行: sudo ufw delete allow 22/tcp"
+        log_warn "临时保留22端口10分钟，确认新端口可用后自动删除"
+        # 创建定时任务10分钟后删除22端口
+        echo "ufw delete allow 22/tcp 2>/dev/null" | at now + 10 minutes 2>/dev/null || true
     fi
     
     # 添加常用服务端口
@@ -392,21 +278,15 @@ configure_fail2ban() {
         apt-get install -y fail2ban
     fi
     
-    # 停止服务以便配置
+    # 停止服务
     systemctl stop fail2ban 2>/dev/null || true
     
-    # 清理可能存在的错误socket文件
-    rm -f /var/run/fail2ban/fail2ban.sock 2>/dev/null || true
-    
-    # 创建运行目录
-    mkdir -p /var/run/fail2ban
-    
-    # 创建简化的配置文件
+    # 创建配置文件
     cat > /etc/fail2ban/jail.local << EOF
 [DEFAULT]
 bantime = 3600
 findtime = 600
-maxretry = 3
+maxretry = 5
 backend = systemd
 ignoreip = 127.0.0.1/8 ::1
 
@@ -414,27 +294,22 @@ ignoreip = 127.0.0.1/8 ::1
 enabled = true
 port = $SSH_PORT
 filter = sshd
-maxretry = 3
+maxretry = 5
 bantime = 3600
 findtime = 600
 EOF
-    
-    # 修复权限
-    chmod 644 /etc/fail2ban/jail.local
     
     # 启动fail2ban
     systemctl daemon-reload
     systemctl enable fail2ban 2>/dev/null || true
     systemctl start fail2ban 2>/dev/null || true
     
-    # 等待服务启动
     sleep 2
     
-    # 检查服务状态
     if systemctl is-active --quiet fail2ban; then
         log_info "Fail2ban 已成功启动"
     else
-        log_warn "Fail2ban 启动失败，请手动检查: journalctl -u fail2ban"
+        log_warn "Fail2ban 启动失败，请手动检查"
     fi
 }
 
@@ -452,17 +327,8 @@ net.core.somaxconn = 4096
 net.ipv4.tcp_max_syn_backlog = 8192
 net.core.netdev_max_backlog = 16384
 
-# Buffer optimization
-net.core.rmem_default = 31457280
-net.core.rmem_max = 134217728
-net.core.wmem_default = 31457280
-net.core.wmem_max = 134217728
-net.ipv4.tcp_rmem = 4096 87380 134217728
-net.ipv4.tcp_wmem = 4096 65536 134217728
-
 # TCP optimization
 net.ipv4.tcp_fastopen = 3
-net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 30
 net.ipv4.tcp_keepalive_time = 1200
@@ -486,18 +352,11 @@ EOF
     # BBR配置（仅在支持时添加）
     if [ "$HAS_BBR_SUPPORT" = true ]; then
         log_info "配置BBR拥塞控制..."
-        
-        # 加载BBR模块
         modprobe tcp_bbr 2>/dev/null || true
-        
-        # 添加BBR配置
         echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.d/99-optimization.conf
-        
-        # 确保模块开机加载
         echo "tcp_bbr" > /etc/modules-load.d/bbr.conf
     else
         log_warn "当前内核不支持BBR，使用默认拥塞控制"
-        echo "net.ipv4.tcp_congestion_control = cubic" >> /etc/sysctl.d/99-optimization.conf
     fi
     
     # 应用配置
@@ -507,8 +366,6 @@ EOF
     if [ "$HAS_BBR_SUPPORT" = true ]; then
         if sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr; then
             log_info "BBR已成功启用"
-        else
-            log_warn "BBR可能需要重启后才能生效"
         fi
     fi
 }
@@ -519,7 +376,7 @@ configure_auto_updates() {
     
     # 确保unattended-upgrades已安装
     if ! dpkg -l | grep -q "^ii.*unattended-upgrades"; then
-        apt-get install -y unattended-upgrades apt-listchanges
+        apt-get install -y unattended-upgrades
     fi
     
     # 配置自动更新
@@ -547,43 +404,44 @@ EOF
     log_info "自动安全更新已启用"
 }
 
-# 创建登录信息
-create_motd() {
-    log_step "创建登录欢迎信息"
+# 创建恢复脚本
+create_recovery_script() {
+    log_step "创建紧急恢复脚本"
     
-    local kernel_info=$(uname -r)
-    local bbr_status="未启用"
-    if sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr; then
-        bbr_status="已启用"
-    fi
-    
-    cat > /etc/motd << EOF
-╔══════════════════════════════════════════════════════════╗
-║          Debian Security Hardened Server                ║
-╠══════════════════════════════════════════════════════════╣
-║  系统信息:                                               ║
-║  • 主机名称: $HOSTNAME
-║  • 服务器IP: $SERVER_IP
-║  • 内核版本: $kernel_info
-║  • 管理用户: $ADMIN_USER
-║  • SSH端口: $SSH_PORT
-║  • BBR状态: $bbr_status
-╠══════════════════════════════════════════════════════════╣
-║  警告: 所有操作都会被记录和监控                          ║
-╚══════════════════════════════════════════════════════════╝
+    cat > /root/emergency_recovery.sh << 'EOF'
+#!/bin/bash
+# 紧急恢复脚本 - 恢复SSH访问
+
+echo "开始紧急恢复..."
+
+# 停止防火墙
+ufw disable
+systemctl stop fail2ban
+
+# 恢复SSH默认配置
+rm -f /etc/ssh/sshd_config.d/99-security.conf
+cat > /etc/ssh/sshd_config.d/01-recovery.conf << EOL
+Port 22
+Port 597
+Port 2222
+PermitRootLogin yes
+PasswordAuthentication yes
+EOL
+
+# 重启SSH
+systemctl restart ssh
+systemctl restart sshd
+
+echo "恢复完成！现在可以通过端口 22, 597, 2222 连接"
 EOF
+    
+    chmod +x /root/emergency_recovery.sh
+    log_info "紧急恢复脚本已创建: /root/emergency_recovery.sh"
 }
 
 # 系统测试函数
 test_configuration() {
     log_step "测试配置"
-    
-    # 测试主机名
-    if hostname -f &>/dev/null; then
-        log_info "✓ 主机名配置正常: $(hostname -f)"
-    else
-        log_warn "⚠ 主机名可能未正确配置"
-    fi
     
     # 测试SSH
     if sshd -t &>/dev/null; then
@@ -606,11 +464,11 @@ test_configuration() {
         log_warn "⚠ Fail2ban未运行"
     fi
     
-    # 测试sudo权限
-    if sudo -l -U "$ADMIN_USER" &>/dev/null; then
-        log_info "✓ Sudo权限配置正常"
-    else
-        log_warn "⚠ Sudo权限可能有问题"
+    # 测试BBR
+    if [ "$HAS_BBR_SUPPORT" = true ]; then
+        if sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr; then
+            log_info "✓ BBR已启用"
+        fi
     fi
 }
 
@@ -622,10 +480,7 @@ show_completion_info() {
     echo -e "╚══════════════════════════════════════════════════════════╝${NC}\n"
     
     echo -e "${GREEN}✅ 已完成的配置：${NC}"
-    echo -e "  • 服务器名称: ${YELLOW}$HOSTNAME${NC}"
-    echo -e "  • hosts文件已正确配置"
-    echo -e "  • 完整系统更新"
-    echo -e "  • 管理用户创建: ${YELLOW}$ADMIN_USER${NC}"
+    echo -e "  • 系统更新"
     echo -e "  • SSH安全配置 (端口: ${YELLOW}$SSH_PORT${NC})"
     echo -e "  • 防火墙配置 (UFW)"
     echo -e "  • Fail2Ban防护"
@@ -639,51 +494,40 @@ show_completion_info() {
     echo -e "\n${YELLOW}═══════════════════════════════════════════${NC}"
     echo -e "${YELLOW}📝 重要信息（请保存）：${NC}"
     echo -e "${YELLOW}═══════════════════════════════════════════${NC}"
-    echo -e "服务器域名: ${GREEN}$HOSTNAME${NC}"
     echo -e "服务器IP: ${GREEN}$SERVER_IP${NC}"
-    echo -e "SSH连接命令: ${GREEN}ssh -p $SSH_PORT $ADMIN_USER@$SERVER_IP${NC}"
-    echo -e "管理员用户: ${GREEN}$ADMIN_USER${NC}"
+    echo -e "SSH连接命令: ${GREEN}ssh -p $SSH_PORT root@$SERVER_IP${NC}"
     echo -e "SSH端口: ${GREEN}$SSH_PORT${NC}"
     echo -e "${YELLOW}═══════════════════════════════════════════${NC}"
     
     if [[ "$SSH_PORT" != "22" ]]; then
         echo -e "\n${RED}⚠️  重要提醒：${NC}"
         echo -e "  SSH端口已改为 ${YELLOW}$SSH_PORT${NC}"
-        echo -e "  确认新端口可用后，删除临时22端口："
-        echo -e "  ${BLUE}sudo ufw delete allow 22/tcp${NC}"
+        echo -e "  临时保留22端口10分钟，请立即测试新端口连接"
+        echo -e "  10分钟后22端口将自动关闭"
     fi
     
     echo -e "\n${GREEN}🔧 常用管理命令：${NC}"
-    echo -e "  查看防火墙: ${BLUE}sudo ufw status${NC}"
-    echo -e "  查看Fail2ban: ${BLUE}sudo fail2ban-client status${NC}"
-    echo -e "  查看系统日志: ${BLUE}sudo journalctl -xe${NC}"
-    echo -e "  测试BBR: ${BLUE}sudo sysctl net.ipv4.tcp_congestion_control${NC}"
-    echo -e "  查看hosts: ${BLUE}cat /etc/hosts${NC}"
-    
-    echo -e "\n${YELLOW}📊 自动更新时间：${NC}"
-    echo -e "  系统将在每天 6:00 和 18:00 自动检查更新"
+    echo -e "  查看防火墙: ${BLUE}ufw status${NC}"
+    echo -e "  查看Fail2ban: ${BLUE}fail2ban-client status${NC}"
+    echo -e "  查看系统日志: ${BLUE}journalctl -xe${NC}"
+    echo -e "  紧急恢复: ${BLUE}/root/emergency_recovery.sh${NC}"
     
     # 保存配置信息到文件
     cat > /root/server_info.txt << EOF
 ========================================
-Debian Server Configuration Information
+服务器安全配置信息
 ========================================
-Date: $(date)
-Hostname: $HOSTNAME
-Short Name: $HOSTNAME_SHORT
-Server IP: $SERVER_IP
-Admin User: $ADMIN_USER
-SSH Port: $SSH_PORT
-Kernel: $(uname -r)
-BBR Status: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "N/A")
+配置时间: $(date)
+服务器IP: $SERVER_IP
+SSH端口: $SSH_PORT
+内核版本: $(uname -r)
+BBR状态: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "N/A")
 
-SSH Connection:
-ssh -p $SSH_PORT $ADMIN_USER@$SERVER_IP
+SSH连接命令:
+ssh -p $SSH_PORT root@$SERVER_IP
 
-Important: Root login is disabled!
-
-/etc/hosts content:
-$(cat /etc/hosts)
+紧急恢复脚本:
+/root/emergency_recovery.sh
 ========================================
 EOF
     
@@ -694,8 +538,8 @@ EOF
 main() {
     clear
     echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗"
-    echo -e "║     Debian 12 Security Setup Script (Clean Version)     ║"
-    echo -e "║            精简版 - 适用于新服务器快速配置               ║"
+    echo -e "║        Debian 12 安全配置脚本 - Root版本                ║"
+    echo -e "║            保持root访问 + 安全加固                       ║"
     echo -e "╚══════════════════════════════════════════════════════════╝${NC}\n"
     
     # 基础检查
@@ -705,19 +549,18 @@ main() {
     # 用户输入
     get_user_input
     
-    # 设置服务器名称（包括hosts文件）
-    set_hostname
+    # 更新root密码
+    update_root_password
     
     # 执行配置
     full_system_update
     install_packages
-    create_admin_user
     configure_ssh
     setup_firewall
     configure_fail2ban
     configure_system_optimization
     configure_auto_updates
-    create_motd
+    create_recovery_script
     
     # 测试配置
     test_configuration
@@ -725,25 +568,17 @@ main() {
     # 显示完成信息
     show_completion_info
     
-    # 重启提示
     echo -e "\n${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${YELLOW}建议重启系统以使所有配置完全生效${NC}"
+    echo -e "${GREEN}配置已完成！${NC}"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    read -p "是否现在重启？(Y/n): " -r
     
-    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-        log_info "系统将在10秒后重启..."
-        log_warn "请记住: SSH端口=$SSH_PORT, 用户=$ADMIN_USER"
-        for i in {10..1}; do
-            echo -n "$i... "
-            sleep 1
-        done
-        echo ""
-        reboot
-    else
-        log_info "请稍后手动重启: ${BLUE}sudo reboot${NC}"
-        log_warn "重启前请确保记住SSH端口和用户信息！"
+    if [[ "$SSH_PORT" != "22" ]]; then
+        echo -e "\n${RED}⚠️  重要：请立即开启新的SSH连接测试端口 $SSH_PORT${NC}"
+        echo -e "${RED}    测试成功后再关闭当前连接${NC}"
     fi
+    
+    echo -e "\n${BLUE}提示：如遇连接问题，可通过VPS控制台执行恢复脚本：${NC}"
+    echo -e "${YELLOW}/root/emergency_recovery.sh${NC}"
 }
 
 # 执行主函数
