@@ -19,7 +19,7 @@
 # 项目地址: https://raw.githubusercontent.com/zaochui/debian12/main/install_mail_server.sh
 # ============================================================================
 
-set -euo pipefail
+set -eo pipefail
 
 # ============================================================================
 # 全局配置变量
