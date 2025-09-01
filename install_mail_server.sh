@@ -80,7 +80,7 @@ success() {
 
 # 警告提示
 warning() {
-    print_color "$YELLOW" "⚠️  $1"
+    print_color "$YELLOW" ⚠️  $1"
     log "警告: $1"
 }
 
@@ -428,17 +428,21 @@ check_dns() {
     print_color "$PURPLE" "  DNS 配置检查"
     print_color "$PURPLE" "========================================"
     
-    # 安装 DNS 工具
-    if ! command -v dig &> /dev/null; then
-        info "安装 DNS 工具..."
-        apt-get install -y dnsutils curl
+    # 确保 SERVER_IP 已正确获取
+    if [[ -z "$SERVER_IP" ]]; then
+        SERVER_IP=$(get_server_ip)
     fi
     
     info "服务器公网 IP: $SERVER_IP"
     
-    # 检查 A 记录
+    # 安装 DNS 工具（如果未安装）
+    if ! command -v dig &> /dev/null; then
+        info "安装 DNS 工具..."
+        apt-get install -y dnsutils
+    fi
+    
     info "检查 DNS A 记录..."
-    DNS_IP=$(dig +short "$HOSTNAME" A 2>/dev/null | head -n1)
+    DNS_IP=$(dig +short "$HOSTNAME" A 2>/dev/null | head -n1 | tr -d '\n')
     
     if [[ -z "$DNS_IP" ]]; then
         warning "域名 $HOSTNAME 没有 DNS A 记录！"
@@ -454,17 +458,23 @@ check_dns() {
             info "您可以稍后再运行此脚本"
             exit 0
         fi
-    elif [[ "$DNS_IP" != "$SERVER_IP" ]]; then
-        warning "DNS 解析不匹配！"
-        echo "域名解析到: $DNS_IP"
-        echo "服务器 IP:  $SERVER_IP"
-        
-        if ! confirm "DNS 配置可能有误，是否继续？"; then
-            info "请先修正 DNS 配置"
-            exit 0
-        fi
     else
-        success "DNS A 记录正确: $DNS_IP"
+        # 标准化 IP 格式（移除空格和换行符）
+        DNS_IP=$(echo "$DNS_IP" | tr -d '[:space:]')
+        SERVER_IP=$(echo "$SERVER_IP" | tr -d '[:space:]')
+        
+        if [[ "$DNS_IP" != "$SERVER_IP" ]]; then
+            warning "DNS 解析不匹配！"
+            echo "域名解析到: $DNS_IP"
+            echo "服务器 IP:  $SERVER_IP"
+            
+            if ! confirm "DNS 配置可能有误，是否继续？"; then
+                info "请先修正 DNS 配置"
+                exit 0
+            fi
+        else
+            success "DNS A 记录正确: $DNS_IP"
+        fi
     fi
 }
 
@@ -687,16 +697,32 @@ configure_postfix() {
     print_color "$PURPLE" "========================================"
     
     info "配置 Postfix 主配置文件..."
-    
+
+    # 创建 /etc/aliases（如果不存在）
+    if [[ ! -f /etc/aliases ]]; then
+        touch /etc/aliases
+    fi
+
+    # 强制写入 root 别名（覆盖旧内容）
+    echo "root: admin@$DOMAIN" > /etc/aliases
+    echo "postmaster: admin@$DOMAIN" >> /etc/aliases
+
+    # 生成别名数据库
+    newaliases
+
     # 备份原配置
     cp /etc/postfix/main.cf /etc/postfix/main.cf.backup 2>/dev/null || true
     
-    # 生成主配置文件
+    # 生成主配置文件（原有逻辑）
     cat > /etc/postfix/main.cf << EOF
-# ====================================================
-# Postfix 主配置文件
-# 生成时间: $(date)
-# ====================================================
+    # ====================================================
+    # Postfix 主配置文件
+    # 生成时间: $(date)
+    # ====================================================
+
+    # 重启 Postfix（原有逻辑）
+    systemctl restart postfix
+}
 
 # 基础设置
 smtpd_banner = \$myhostname ESMTP
@@ -713,7 +739,7 @@ mydestination = localhost.\$mydomain, localhost
 
 # 网络设置
 inet_interfaces = all
-inet_protocols = ipv4
+inet_protocols = all  # 只在这里定义一次，支持 IPv4 和 IPv6
 mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128
 
 # 别名
