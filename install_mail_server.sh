@@ -464,7 +464,7 @@ check_dns() {
             exit 0
         fi
     else
-        success "DNS A 记录正确"
+        success "DNS A 记录正确: $DNS_IP"
     fi
 }
 
@@ -530,8 +530,8 @@ EOF
     
     # 创建别名文件
     touch /etc/aliases
-    echo "root: root" > /etc/aliases
-    echo "postmaster: root" >> /etc/aliases
+    echo "root: admin@$DOMAIN" > /etc/aliases
+    echo "postmaster: admin@$DOMAIN" >> /etc/aliases
     
     # 生成别名数据库
     newaliases
