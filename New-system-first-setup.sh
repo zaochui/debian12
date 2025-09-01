@@ -151,6 +151,7 @@ install_packages() {
     
     # 基础工具列表
     local packages=(
+        "sudo"
         "curl"
         "wget"
         "htop"
@@ -470,6 +471,13 @@ test_configuration() {
             log_info "✓ BBR已启用"
         fi
     fi
+    
+    # 测试sudo
+    if command -v sudo &>/dev/null; then
+        log_info "✓ sudo已安装"
+    else
+        log_warn "⚠ sudo未安装"
+    fi
 }
 
 # 显示完成信息
@@ -481,6 +489,7 @@ show_completion_info() {
     
     echo -e "${GREEN}✅ 已完成的配置：${NC}"
     echo -e "  • 系统更新"
+    echo -e "  • sudo安装"
     echo -e "  • SSH安全配置 (端口: ${YELLOW}$SSH_PORT${NC})"
     echo -e "  • 防火墙配置 (UFW)"
     echo -e "  • Fail2Ban防护"
@@ -511,6 +520,7 @@ show_completion_info() {
     echo -e "  查看Fail2ban: ${BLUE}fail2ban-client status${NC}"
     echo -e "  查看系统日志: ${BLUE}journalctl -xe${NC}"
     echo -e "  紧急恢复: ${BLUE}/root/emergency_recovery.sh${NC}"
+    echo -e "  sudo使用: ${BLUE}sudo <命令>${NC}"
     
     # 保存配置信息到文件
     cat > /root/server_info.txt << EOF
@@ -522,6 +532,7 @@ show_completion_info() {
 SSH端口: $SSH_PORT
 内核版本: $(uname -r)
 BBR状态: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "N/A")
+sudo状态: 已安装
 
 SSH连接命令:
 ssh -p $SSH_PORT root@$SERVER_IP
