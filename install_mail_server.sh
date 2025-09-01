@@ -2,7 +2,7 @@
 
 # ============================================================================
 # Debian 12 邮件服务器一键部署脚本 - 完整修复版
-# 版本: 2.3.0
+# 版本: 2.4.0
 # 作者: 开源社区版
 # 协议: MIT
 # 
@@ -14,8 +14,10 @@
 # - Fail2ban 防暴力破解
 # - 用户管理工具
 # - 健康检查监控
+# - 可自定义服务器IP
 # 
-# 使用方法: bash install_mail_server.sh
+# 使用方法: bash install_mail_server.sh [IP地址]
+# 示例: bash install_mail_server.sh 192.168.1.100
 # ============================================================================
 
 set -eo pipefail
@@ -24,10 +26,13 @@ set -eo pipefail
 # 全局配置变量
 # ============================================================================
 
-SCRIPT_VERSION="2.3.0"
+SCRIPT_VERSION="2.4.0"
 SCRIPT_NAME="Debian 12 邮件服务器部署脚本"
 LOG_FILE="/var/log/mail-server-setup.log"
 BACKUP_DIR="/var/backups/mail-setup-$(date +%Y%m%d_%H%M%S)"
+
+# 自定义服务器IP（可通过命令行参数指定）
+CUSTOM_SERVER_IP="${1:-}"
 
 # 颜色定义
 RED='\033[0;31m'
@@ -105,6 +110,47 @@ confirm() {
     else
         [[ $REPLY =~ ^[Yy]$ ]]
     fi
+}
+
+# 获取服务器IP地址
+get_server_ip() {
+    local ip=""
+    
+    # 如果指定了自定义IP，使用它
+    if [[ -n "$CUSTOM_SERVER_IP" ]]; then
+        # 验证IP格式
+        if [[ "$CUSTOM_SERVER_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            ip="$CUSTOM_SERVER_IP"
+            info "使用指定的服务器IP: $ip"
+        else
+            warning "指定的IP格式无效: $CUSTOM_SERVER_IP，将自动检测"
+        fi
+    fi
+    
+    # 如果没有有效的自定义IP，自动检测
+    if [[ -z "$ip" ]]; then
+        info "自动检测服务器公网IP..."
+        ip=$(curl -s -4 --connect-timeout 5 ifconfig.me || \
+             curl -s -4 --connect-timeout 5 icanhazip.com || \
+             curl -s -4 --connect-timeout 5 ipinfo.io/ip || \
+             ip route get 1 2>/dev/null | awk '{print $7;exit}' || \
+             ip addr show | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' | cut -d'/' -f1)
+    fi
+    
+    # 如果仍然无法获取，要求用户输入
+    if [[ -z "$ip" ]] || [[ ! "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        warning "无法自动获取服务器IP地址"
+        while true; do
+            read -p "请手动输入服务器公网IP地址: " ip
+            if [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+                break
+            else
+                warning "IP地址格式无效，请重新输入"
+            fi
+        done
+    fi
+    
+    echo "$ip"
 }
 
 # ============================================================================
@@ -341,13 +387,12 @@ configure_hostname() {
         read -p "请输入域名（如 example.com）: " DOMAIN
     fi
     
+    # 获取服务器IP
+    SERVER_IP=$(get_server_ip)
+    
     # 设置主机名
     info "设置主机名为: $HOSTNAME"
     hostnamectl set-hostname "$HOSTNAME" 2>/dev/null || hostname "$HOSTNAME"
-    
-    # 获取服务器IP
-    local primary_ip=$(ip route get 1 2>/dev/null | awk '{print $7;exit}' || \
-                       ip addr show | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' | cut -d'/' -f1)
     
     # 更新 /etc/hosts
     cat > /etc/hosts << EOF
@@ -358,7 +403,7 @@ configure_hostname() {
 127.0.1.1   $HOSTNAME $(echo $HOSTNAME | cut -d. -f1)
 
 # Server IP mapping
-${primary_ip:-192.210.140.19}   $HOSTNAME $(echo $HOSTNAME | cut -d. -f1)
+$SERVER_IP   $HOSTNAME $(echo $HOSTNAME | cut -d. -f1)
 
 # IPv6 defaults
 ::1         localhost ip6-localhost ip6-loopback
@@ -371,6 +416,7 @@ EOF
     
     success "主机名已配置: $HOSTNAME"
     success "域名: $DOMAIN"
+    success "服务器IP: $SERVER_IP"
 }
 
 # ============================================================================
@@ -386,18 +432,6 @@ check_dns() {
     if ! command -v dig &> /dev/null; then
         info "安装 DNS 工具..."
         apt-get install -y dnsutils curl
-    fi
-    
-    # 获取服务器公网 IP
-    info "获取服务器公网 IP..."
-    SERVER_IP=$(curl -s -4 --connect-timeout 5 ifconfig.me || \
-                curl -s -4 --connect-timeout 5 icanhazip.com || \
-                curl -s -4 --connect-timeout 5 ipinfo.io/ip || \
-                echo "192.210.140.19")
-    
-    if [[ -z "$SERVER_IP" ]]; then
-        warning "无法自动获取公网 IP"
-        read -p "请手动输入服务器公网 IP: " SERVER_IP
     fi
     
     info "服务器公网 IP: $SERVER_IP"
@@ -1026,11 +1060,6 @@ EOF
     systemctl restart opendkim
     systemctl enable opendkim
     
-    # 获取 DKIM 记录
-    if [[ -f /etc/opendkim/keys/$DOMAIN/mail.txt ]]; then
-        DKIM_RECORD=$(cat /etc/opendkim/keys/$DOMAIN/mail.txt | tr -d '\n' | sed 's/.*(\(.*\)).*/\1/' | tr -d ' \t\"')
-    fi
-    
     success "DKIM 配置完成"
 }
 
@@ -1349,17 +1378,30 @@ create_initial_users() {
 }
 
 # ============================================================================
-# 显示配置信息
+# 显示配置信息（增强版 - 包含 DKIM 详细显示）
 # ============================================================================
 
 show_configuration() {
     # 获取服务器信息
-    local server_ip=$(curl -s -4 ifconfig.me 2>/dev/null || echo "192.210.140.19")
     local dkim_record=""
+    local dkim_file="/etc/opendkim/keys/$DOMAIN/mail.txt"
     
-    if [[ -f /etc/opendkim/keys/$DOMAIN/mail.txt ]]; then
-        dkim_record=$(cat /etc/opendkim/keys/$DOMAIN/mail.txt 2>/dev/null | \
-                     tr -d '\n' | sed 's/.*(\(.*\)).*/\1/' | tr -d ' \t\"')
+    # 提取 DKIM 记录
+    if [[ -f "$dkim_file" ]]; then
+        # 提取完整的 DKIM 记录值
+        dkim_record=$(cat "$dkim_file" 2>/dev/null | grep -o 'v=DKIM1[^"]*' | head -1)
+        
+        # 如果上面的方法失败，尝试另一种提取方式
+        if [[ -z "$dkim_record" ]]; then
+            dkim_record=$(cat "$dkim_file" 2>/dev/null | \
+                         sed -n 's/.*"\(v=DKIM1[^"]*\)".*/\1/p' | head -1)
+        fi
+        
+        # 最后的备用方法：提取括号内的内容
+        if [[ -z "$dkim_record" ]]; then
+            dkim_record=$(cat "$dkim_file" 2>/dev/null | \
+                         tr -d '\n' | sed 's/.*(\(.*\)).*/\1/' | tr -d ' \t\"')
+        fi
     fi
     
     print_color "$GREEN" "\n========================================"
@@ -1374,7 +1416,7 @@ show_configuration() {
     echo "1️⃣  A 记录:"
     echo "   类型: A"
     echo "   名称: $(echo $HOSTNAME | cut -d. -f1)"
-    echo "   值:   $server_ip"
+    echo "   值:   $SERVER_IP"
     echo ""
     
     echo "2️⃣  MX 记录:"
@@ -1387,7 +1429,7 @@ show_configuration() {
     echo "3️⃣  SPF 记录:"
     echo "   类型: TXT"
     echo "   名称: @"
-    echo "   值:   \"v=spf1 mx a ip4:$server_ip ~all\""
+    echo "   值:   \"v=spf1 mx a ip4:$SERVER_IP ~all\""
     echo ""
     
     if [[ -n "$dkim_record" ]]; then
@@ -1395,6 +1437,24 @@ show_configuration() {
         echo "   类型: TXT"
         echo "   名称: mail._domainkey"
         echo "   值:   \"$dkim_record\""
+        echo ""
+        
+        # 特别为 Cloudflare 用户提供明确的复制区域
+        print_color "$YELLOW" "🔐 DKIM 记录详细信息（用于 Cloudflare DNS 配置）:"
+        echo "=================================================="
+        echo "记录类型: TXT"
+        echo "名称/主机: mail._domainkey"
+        echo "内容/值:"
+        echo "----------------------------------------"
+        echo "$dkim_record"
+        echo "----------------------------------------"
+        echo ""
+        print_color "$YELLOW" "📋 复制上面的 DKIM 值到 Cloudflare DNS 设置中！"
+        echo ""
+    else
+        warning "未找到 DKIM 记录文件，请检查 OpenDKIM 配置"
+        echo "您可以稍后运行以下命令查看 DKIM 记录："
+        echo "cat /etc/opendkim/keys/$DOMAIN/mail.txt"
         echo ""
     fi
     
@@ -1417,6 +1477,10 @@ show_configuration() {
     echo "  mailuser list            - 查看所有邮箱"
     echo ""
     
+    echo "DKIM 管理:"
+    echo "  cat /etc/opendkim/keys/$DOMAIN/mail.txt  - 查看完整 DKIM 记录"
+    echo ""
+    
     print_color "$BLUE" "📱 客户端配置"
     echo "在邮件客户端中使用以下设置:"
     echo ""
@@ -1434,7 +1498,35 @@ show_configuration() {
     echo "  用户名: 完整邮箱地址"
     echo ""
     
-    print_color "$GREEN" "安装成功！请配置 DNS 记录后开始使用。"
+    # 额外添加 DKIM 记录保存到文件，方便后续查看
+    if [[ -n "$dkim_record" ]]; then
+        cat > /root/dkim-record.txt << EOF
+DKIM 记录配置信息
+================
+域名: $DOMAIN
+服务器IP: $SERVER_IP
+生成时间: $(date)
+
+Cloudflare DNS 配置:
+记录类型: TXT
+名称: mail._domainkey
+内容: $dkim_record
+
+完整记录文件位置: /etc/opendkim/keys/$DOMAIN/mail.txt
+EOF
+        
+        print_color "$GREEN" "💾 DKIM 记录已保存到 /root/dkim-record.txt 方便后续查看"
+        echo ""
+    fi
+    
+    print_color "$GREEN" "🎉 安装成功！请配置 DNS 记录后开始使用。"
+    
+    # 显示关键的下一步操作
+    print_color "$YELLOW" "📌 下一步操作："
+    echo "1. 将上述 DNS 记录添加到 Cloudflare"
+    echo "2. 等待 DNS 传播（通常需要几分钟到几小时）"
+    echo "3. 使用邮件客户端测试收发邮件"
+    echo "4. 可通过 https://mxtoolbox.com 测试 DNS 配置"
 }
 
 # ============================================================================
@@ -1448,6 +1540,14 @@ main() {
     print_color "$PURPLE" "  $SCRIPT_NAME"
     print_color "$PURPLE" "  版本: $SCRIPT_VERSION"
     print_color "$PURPLE" "========================================"
+    echo ""
+    
+    # 显示使用的IP信息
+    if [[ -n "$CUSTOM_SERVER_IP" ]]; then
+        info "使用自定义服务器IP: $CUSTOM_SERVER_IP"
+    else
+        info "将自动检测服务器IP地址"
+    fi
     echo ""
     
     # 初始化日志
@@ -1491,7 +1591,7 @@ main() {
 安装时间: $(date)
 主机名: $HOSTNAME
 域名: $DOMAIN
-服务器 IP: ${SERVER_IP:-192.210.140.19}
+服务器 IP: $SERVER_IP
 
 管理命令:
 - mailuser: 邮箱用户管理
@@ -1512,12 +1612,30 @@ EOF
 # 脚本入口
 # ============================================================================
 
-# 处理参数
-if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
+# 显示帮助信息
+show_script_help() {
     echo "$SCRIPT_NAME"
     echo "版本: $SCRIPT_VERSION"
     echo ""
-    echo "用法: bash $0"
+    echo "用法: bash $0 [IP地址]"
+    echo ""
+    echo "参数:"
+    echo "  IP地址    - 可选，指定服务器公网IP地址"
+    echo ""
+    echo "示例:"
+    echo "  bash $0                    # 自动检测服务器IP"
+    echo "  bash $0 192.168.1.100      # 使用指定IP"
+    echo "  bash $0 203.0.113.10       # 使用指定公网IP"
+    echo ""
+    echo "说明:"
+    echo "  - 如果不指定IP，脚本会自动尝试检测服务器的公网IP"
+    echo "  - 可以手动指定IP以适用于不同的服务器环境"
+    echo "  - 脚本支持 Debian 11+ 系统"
+}
+
+# 处理参数
+if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
+    show_script_help
     exit 0
 fi
 
