@@ -356,13 +356,13 @@ configure_hostname() {
     # 验证 FQDN 格式
     is_valid_fqdn() {
     local hostname=$1
-    # 检查是否符合FQDN格式（字母、数字、连字符和点号组成，且至少包含一个点）
-    if [[ "$hostname" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]] && \
+    # 简化正则表达式，避免括号冲突
+    if [[ "$hostname" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]{0,61}[a-zA-Z0-9]$ ]] && \
        [[ "$hostname" == *.* ]] && \
-       [[ ! "$hostname" =~ [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-        return 0  # 验证通过
+       [[ ! "$hostname" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        return 0
     else
-        return 1  # 验证失败
+        return 1
     fi
 }
     
