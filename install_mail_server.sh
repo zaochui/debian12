@@ -2,7 +2,7 @@
 
 # ============================================================================
 # Debian 12 邮件服务器一键部署脚本 - 完整修复版
-# 版本: 2.4.0
+# 版本: 2.4.1
 # 作者: 开源社区版
 # 协议: MIT
 # 
@@ -26,7 +26,7 @@ set -eo pipefail
 # 全局配置变量
 # ============================================================================
 
-SCRIPT_VERSION="2.4.0"
+SCRIPT_VERSION="2.4.1"
 SCRIPT_NAME="Debian 12 邮件服务器部署脚本"
 LOG_FILE="/var/log/mail-server-setup.log"
 BACKUP_DIR="/var/backups/mail-setup-$(date +%Y%m%d_%H%M%S)"
@@ -80,7 +80,7 @@ success() {
 
 # 警告提示
 warning() {
-    print_color "$YELLOW" ⚠️  $1"
+    print_color "$YELLOW" "⚠️  $1"
     log "警告: $1"
 }
 
@@ -713,16 +713,12 @@ configure_postfix() {
     # 备份原配置
     cp /etc/postfix/main.cf /etc/postfix/main.cf.backup 2>/dev/null || true
     
-    # 生成主配置文件（原有逻辑）
+    # 生成主配置文件
     cat > /etc/postfix/main.cf << EOF
-    # ====================================================
-    # Postfix 主配置文件
-    # 生成时间: $(date)
-    # ====================================================
-
-    # 重启 Postfix（原有逻辑）
-    systemctl restart postfix
-}
+# ====================================================
+# Postfix 主配置文件
+# 生成时间: $(date)
+# ====================================================
 
 # 基础设置
 smtpd_banner = \$myhostname ESMTP
@@ -739,7 +735,7 @@ mydestination = localhost.\$mydomain, localhost
 
 # 网络设置
 inet_interfaces = all
-inet_protocols = all  # 只在这里定义一次，支持 IPv4 和 IPv6
+inet_protocols = all
 mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128
 
 # 别名
