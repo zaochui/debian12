@@ -437,6 +437,9 @@ check_dns() {
     print_color "$PURPLE" "  DNS 配置检查"
     print_color "$PURPLE" "========================================"
     
+    # 确保SERVER_IP是纯净的IP地址
+    SERVER_IP=$(echo "$SERVER_IP" | grep -oE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}')
+    
     info "当前服务器IP: $SERVER_IP"
     
     # 安装 DNS 工具（如果未安装）
@@ -445,55 +448,37 @@ check_dns() {
         apt-get install -y dnsutils >/dev/null 2>&1
     fi
     
-    info "检查域名 $HOSTNAME 的 DNS A 记录..."
+    info "检查域名 DNS 解析..."
     
-    # 获取DNS解析结果，清理格式
+    # 获取DNS解析结果
     DNS_IP=$(dig +short "$HOSTNAME" A 2>/dev/null | head -n1 | tr -d '[:space:][:cntrl:]')
     
+    echo ""
+    echo "DNS 检查结果："
+    echo "===================="
+    echo "域名: $HOSTNAME"
+    if [[ -n "$DNS_IP" ]]; then
+        echo "DNS 解析到: $DNS_IP"
+    else
+        echo "DNS 解析到: 无记录"
+    fi
+    echo "服务器 IP: $SERVER_IP"
+    echo ""
+    
     if [[ -z "$DNS_IP" ]]; then
-        warning "域名 $HOSTNAME 没有 DNS A 记录！"
-        echo
-        print_color "$YELLOW" "请在您的 DNS 服务商处添加以下记录："
-        echo "----------------------------------------"
+        print_color "$YELLOW" "域名尚未配置 DNS A 记录，请在 DNS 服务商处添加："
         echo "类型: A"
         echo "名称: $(echo $HOSTNAME | cut -d. -f1)"
         echo "值:   $SERVER_IP"
-        echo "----------------------------------------"
+        echo ""
         
-        if ! confirm "DNS 记录设置完成后继续？"; then
-            info "您可以稍后再运行此脚本"
+        if ! confirm "是否继续安装？"; then
             exit 0
         fi
     else
-        # 清理服务器IP格式以便比较
-        SERVER_IP_CLEAN=$(echo "$SERVER_IP" | tr -d '[:space:][:cntrl:]')
-        
-        echo "DNS 检查结果:"
-        echo "  域名 $HOSTNAME 解析到: $DNS_IP"
-        echo "  当前服务器IP: $SERVER_IP_CLEAN"
-        
-        if [[ "$DNS_IP" == "$SERVER_IP_CLEAN" ]]; then
-            success "DNS A 记录配置正确"
-        else
-            warning "DNS 解析结果与服务器IP不匹配"
-            echo
-            echo "可能的原因："
-            echo "1. DNS 记录还在传播中（可能需要几分钟到几小时）"
-            echo "2. 域名指向了其他服务器或CDN"
-            echo "3. 您的域名配置了负载均衡"
-            echo
-            
-            if confirm "忽略DNS不匹配继续安装？" "Y"; then
-                info "继续安装，请确保稍后验证DNS配置"
-            else
-                info "请先修正 DNS 配置后再运行脚本"
-                echo
-                echo "需要添加的DNS记录："
-                echo "类型: A"
-                echo "名称: $(echo $HOSTNAME | cut -d. -f1)" 
-                echo "值: $SERVER_IP_CLEAN"
-                exit 0
-            fi
+        print_color "$GREEN" "已检测到 DNS A 记录，请确认解析是否正确"
+        if ! confirm "DNS 配置正确，继续安装？" "Y"; then
+            exit 0
         fi
     fi
 }
