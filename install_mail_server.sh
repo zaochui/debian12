@@ -353,21 +353,49 @@ configure_hostname() {
     print_color "$PURPLE" "  主机名配置"
     print_color "$PURPLE" "========================================"
     
-# 验证 FQDN 格式
+# 验证 FQDN 格式 - 修复版
 is_valid_fqdn() {
     local hostname=$1
-    # 检查基本格式：包含点号，不以数字开头和结尾，不是IP地址格式
-    if [[ "$hostname" =~ \. ]] && \
-       [[ ! "$hostname" =~ ^[0-9] ]] && \
-       [[ ! "$hostname" =~ [0-9]$ ]] && \
-       [[ ! "$hostname" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] && \
-       [[ "$hostname" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]$ ]]; then
-        return 0
-    else
+    
+    # 基本检查：不能为空，必须包含点号
+    if [[ -z "$hostname" ]] || [[ "$hostname" != *.* ]]; then
         return 1
     fi
-}
     
+    # 检查不能是IP地址格式
+    if [[ "$hostname" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        return 1
+    fi
+    
+    # 检查长度和基本字符
+    local length=${#hostname}
+    if [[ $length -lt 4 ]] || [[ $length -gt 253 ]]; then
+        return 1
+    fi
+    
+    # 检查每个标签（由点分隔的部分）
+    IFS='.' read -ra labels <<< "$hostname"
+    for label in "${labels[@]}"; do
+        local label_length=${#label}
+        if [[ $label_length -lt 1 ]] || [[ $label_length -gt 63 ]]; then
+            return 1
+        fi
+        
+        # 检查标签格式：以字母或数字开头和结尾，中间可以包含连字符
+        if [[ ! "$label" =~ ^[a-zA-Z0-9] ]] || \
+           [[ ! "$label" =~ [a-zA-Z0-9]$ ]] || \
+           [[ "$label" =~ [^a-zA-Z0-9-] ]]; then
+            return 1
+        fi
+        
+        # 检查连字符不能连续或在开头/结尾（已通过上述检查确保）
+        if [[ "$label" =~ -- ]]; then
+            return 1
+        fi
+    done
+    
+    return 0
+}
     # 获取输入
     local current_hostname=$(hostname -f 2>/dev/null || hostname)
     info "当前主机名: $current_hostname"
