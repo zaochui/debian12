@@ -532,7 +532,6 @@ mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128
 mailbox_size_limit = 0
 recipient_delimiter = +
 inet_interfaces = all
-inet_protocols = ipv4
 inet_protocols = all
 alias_maps = hash:/etc/aliases
 alias_database = hash:/etc/aliases
