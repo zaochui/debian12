@@ -352,17 +352,7 @@ configure_hostname() {
     print_color "$PURPLE" "\n========================================"
     print_color "$PURPLE" "  主机名配置"
     print_color "$PURPLE" "========================================"
-    
-# 验证 FQDN 格式 - 简单检查
-is_valid_fqdn() {
-    local hostname=$1
-    # 简单检查：包含点号且不是IP地址格式
-    if [[ "$hostname" == *.* ]] && [[ ! "$hostname" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        return 0
-    else
-        return 1
-    fi
-}
+
     # 获取输入
     local current_hostname=$(hostname -f 2>/dev/null || hostname)
     info "当前主机名: $current_hostname"
@@ -371,14 +361,15 @@ is_valid_fqdn() {
     echo "邮件服务器需要一个正确的 FQDN，例如: mail.example.com"
     
     while true; do
-        read -p "请输入邮件服务器主机名: " HOSTNAME
-        
-        if is_valid_fqdn "$HOSTNAME"; then
-            break
-        else
-            warning "主机名格式无效。必须是类似 mail.example.com 的 FQDN"
-        fi
-    done
+    read -p "请输入邮件服务器主机名: " HOSTNAME
+    
+    # 简单验证：必须包含点号且不是IP地址
+    if [[ "$HOSTNAME" == *.* ]] && [[ ! "$HOSTNAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        break
+    else
+        warning "主机名格式无效。必须是类似 mail.example.com 的 FQDN（包含域名）"
+    fi
+done
     
     # 提取域名
     DOMAIN=$(echo "$HOSTNAME" | cut -d. -f2-)
