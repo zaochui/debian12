@@ -353,14 +353,15 @@ configure_hostname() {
     print_color "$PURPLE" "  主机名配置"
     print_color "$PURPLE" "========================================"
     
-    # 验证 FQDN 格式
-    # 验证 FQDN 格式
+# 验证 FQDN 格式
 is_valid_fqdn() {
     local hostname=$1
-    # 简化正则表达式，避免括号冲突
-    if [[ "$hostname" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]{0,61}[a-zA-Z0-9]$ ]] && \
-       [[ "$hostname" == *.* ]] && \
-       [[ ! "$hostname" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+    # 检查基本格式：包含点号，不以数字开头和结尾，不是IP地址格式
+    if [[ "$hostname" =~ \. ]] && \
+       [[ ! "$hostname" =~ ^[0-9] ]] && \
+       [[ ! "$hostname" =~ [0-9]$ ]] && \
+       [[ ! "$hostname" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] && \
+       [[ "$hostname" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]$ ]]; then
         return 0
     else
         return 1
