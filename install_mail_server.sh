@@ -121,7 +121,7 @@ get_server_ip() {
         # 验证IP格式
         if [[ "$CUSTOM_SERVER_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
             ip="$CUSTOM_SERVER_IP"
-            info "使用指定的服务器IP: $ip"
+            return 0
         else
             warning "指定的IP格式无效: $CUSTOM_SERVER_IP，将自动检测"
         fi
@@ -129,12 +129,15 @@ get_server_ip() {
     
     # 如果没有有效的自定义IP，自动检测
     if [[ -z "$ip" ]]; then
-        log "自动检测服务器公网IP..."
-        ip=$(curl -s -4 --connect-timeout 5 ifconfig.me || \
-             curl -s -4 --connect-timeout 5 icanhazip.com || \
-             curl -s -4 --connect-timeout 5 ipinfo.io/ip || \
+        # 静默检测IP，不输出日志
+        ip=$(curl -s -4 --connect-timeout 5 ifconfig.me 2>/dev/null || \
+             curl -s -4 --connect-timeout 5 icanhazip.com 2>/dev/null || \
+             curl -s -4 --connect-timeout 5 ipinfo.io/ip 2>/dev/null || \
              ip route get 1 2>/dev/null | awk '{print $7;exit}' || \
-             ip addr show | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' | cut -d'/' -f1)
+             ip addr show 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' | cut -d'/' -f1)
+        
+        # 清理IP格式
+        ip=$(echo "$ip" | tr -d '[:space:][:cntrl:]')
     fi
     
     # 如果仍然无法获取，要求用户输入
@@ -387,8 +390,14 @@ configure_hostname() {
         read -p "请输入域名（如 example.com）: " DOMAIN
     fi
     
-    # 获取服务器IP
+    # 获取服务器IP - 确保获取纯净IP
+    info "检测服务器公网IP..."
     SERVER_IP=$(get_server_ip)
+    
+    # 验证获取到的IP格式
+    if [[ ! "$SERVER_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        error_exit "获取的服务器IP格式无效: $SERVER_IP"
+    fi
     
     # 设置主机名
     info "设置主机名为: $HOSTNAME"
