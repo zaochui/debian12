@@ -2,7 +2,7 @@
 
 # ============================================================================
 # Debian 12 邮件服务器一键部署脚本 - 完整修复版
-# 版本: 2.4.2
+# 版本: 2.5.0
 # 作者: 开源社区版
 # 协议: MIT
 # 
@@ -26,7 +26,7 @@ set -eo pipefail
 # 全局配置变量
 # ============================================================================
 
-SCRIPT_VERSION="2.4.2"
+SCRIPT_VERSION="2.5.0"
 SCRIPT_NAME="Debian 12 邮件服务器部署脚本"
 LOG_FILE="/var/log/mail-server-setup.log"
 BACKUP_DIR="/var/backups/mail-setup-$(date +%Y%m%d_%H%M%S)"
@@ -1131,7 +1131,7 @@ configure_firewall() {
 }
 
 # ============================================================================
-# 创建管理工具（修复密码输入问题）
+# 创建管理工具（修复版 - 解决密码输入问题）
 # ============================================================================
 
 create_management_tools() {
@@ -1165,86 +1165,84 @@ show_help() {
     echo "用法: mailuser [命令] [参数]"
     echo ""
     echo "命令:"
-    echo "  add <用户名>      - 添加邮箱用户"
-    echo "  delete <用户名>   - 删除邮箱用户"
-    echo "  passwd <用户名>   - 修改用户密码"
-    echo "  list             - 列出所有用户"
+    echo "  add <用户名> [密码]  - 添加邮箱用户（可选密码参数）"
+    echo "  delete <用户名>      - 删除邮箱用户"
+    echo "  passwd <用户名>      - 修改用户密码"
+    echo "  list                 - 列出所有用户"
     echo ""
     echo "示例:"
     echo "  mailuser add john"
+    echo "  mailuser add john mypassword123"
     echo "  mailuser passwd john"
     echo "  mailuser delete john"
 }
 
-# 获取并验证密码（带重试机制）
+# 获取并验证密码（修复版）
 get_password() {
     local prompt_text="${1:-设置密码}"
     local password=""
     local password2=""
-    local max_retries=3
-    local retry_count=0
     
-    while [ $retry_count -lt $max_retries ]; do
-        echo "$prompt_text"
-        
-        # 输入密码
-        read -s -p "输入密码: " password
-        echo
+    # 如果提供了密码参数，直接使用
+    if [ -n "$2" ]; then
+        password="$2"
+        # 验证密码长度
+        if [ ${#password} -lt 6 ]; then
+            echo -e "${RED}错误: 密码至少需要 6 个字符${NC}" >&2
+            return 1
+        fi
+        echo "$password"
+        return 0
+    fi
+    
+    # 交互式输入密码
+    echo "$prompt_text" >&2
+    
+    # 第一次输入密码
+    while true; do
+        echo -n "输入密码: " >&2
+        read -s password
+        echo >&2
         
         # 检查密码是否为空
         if [ -z "$password" ]; then
-            echo -e "${RED}错误: 密码不能为空${NC}"
-            retry_count=$((retry_count + 1))
-            if [ $retry_count -lt $max_retries ]; then
-                echo "请重新输入（剩余尝试次数: $((max_retries - retry_count))）"
-                echo
-            fi
+            echo -e "${RED}错误: 密码不能为空${NC}" >&2
             continue
         fi
         
         # 检查密码长度
         if [ ${#password} -lt 6 ]; then
-            echo -e "${RED}错误: 密码至少需要 6 个字符${NC}"
-            retry_count=$((retry_count + 1))
-            if [ $retry_count -lt $max_retries ]; then
-                echo "请重新输入（剩余尝试次数: $((max_retries - retry_count))）"
-                echo
-            fi
+            echo -e "${RED}错误: 密码至少需要 6 个字符${NC}" >&2
             continue
         fi
         
-        # 确认密码
-        read -s -p "确认密码: " password2
-        echo
-        
-        # 检查密码是否匹配
-        if [ "$password" != "$password2" ]; then
-            echo -e "${RED}错误: 两次输入的密码不匹配${NC}"
-            retry_count=$((retry_count + 1))
-            if [ $retry_count -lt $max_retries ]; then
-                echo "请重新输入（剩余尝试次数: $((max_retries - retry_count))）"
-                echo
-            fi
-            continue
-        fi
-        
-        # 密码验证通过
-        echo "$password"
-        return 0
+        break
     done
     
-    # 达到最大重试次数
-    echo -e "${RED}错误: 密码设置失败，已达到最大尝试次数${NC}"
-    return 1
+    # 确认密码
+    echo -n "确认密码: " >&2
+    read -s password2
+    echo >&2
+    
+    # 检查密码是否匹配
+    if [ "$password" != "$password2" ]; then
+        echo -e "${RED}错误: 两次输入的密码不匹配${NC}" >&2
+        return 1
+    fi
+    
+    # 返回密码
+    echo "$password"
+    return 0
 }
 
-# 添加用户
+# 添加用户（支持密码参数）
 add_user() {
     local username=$1
+    local password_arg="${2:-}"
     
     if [ -z "$username" ]; then
         echo -e "${RED}错误: 请指定用户名${NC}"
-        echo "用法: mailuser add <用户名>"
+        echo "用法: mailuser add <用户名> [密码]"
         exit 1
     fi
     
@@ -1256,14 +1254,21 @@ add_user() {
         exit 1
     fi
     
-    # 获取密码（带重试机制）
-    password=$(get_password "为 ${email} 设置密码")
+    # 获取密码
+    local password
+    password=$(get_password "为 ${email} 设置密码" "$password_arg")
     if [ $? -ne 0 ]; then
+        echo -e "${RED}密码设置失败${NC}"
         exit 1
     fi
     
     # 生成加密密码
-    encrypted_pass=$(doveadm pw -s SHA512-CRYPT -p "$password")
+    local encrypted_pass
+    encrypted_pass=$(doveadm pw -s SHA512-CRYPT -p "$password" 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}错误: 密码加密失败${NC}"
+        exit 1
+    fi
     
     # 添加到 Dovecot 用户文件
     echo "${username}:${encrypted_pass}" >> "$DOVECOT_USERS"
@@ -1289,7 +1294,11 @@ add_user() {
     echo "=========="
     echo "邮箱地址: ${email}"
     echo "用户名: ${email}"
-    echo "密码: [您设置的密码]"
+    if [ -n "$password_arg" ]; then
+        echo "密码: [已设置]"
+    else
+        echo "密码: [您设置的密码]"
+    fi
     echo ""
     echo "服务器设置:"
     echo "IMAP 服务器: $(hostname -f)"
@@ -1355,14 +1364,21 @@ change_password() {
     
     local email="${username}@${DOMAIN}"
     
-    # 获取新密码（带重试机制）
+    # 获取新密码
+    local password
     password=$(get_password "修改 ${email} 的密码")
     if [ $? -ne 0 ]; then
+        echo -e "${RED}密码修改失败${NC}"
         exit 1
     fi
     
     # 生成新密码
-    encrypted_pass=$(doveadm pw -s SHA512-CRYPT -p "$password")
+    local encrypted_pass
+    encrypted_pass=$(doveadm pw -s SHA512-CRYPT -p "$password" 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}错误: 密码加密失败${NC}"
+        exit 1
+    fi
     
     # 更新密码
     sed -i "/^${username}:/c\\${username}:${encrypted_pass}" "$DOVECOT_USERS"
@@ -1391,7 +1407,7 @@ list_users() {
 # 主程序
 case "$1" in
     add)
-        add_user "$2"
+        add_user "$2" "$3"
         ;;
     delete|del|remove)
         delete_user "$2"
@@ -1419,7 +1435,7 @@ SCRIPT_EOF
 }
 
 # ============================================================================
-# 创建初始用户（使用改进的密码输入）
+# 创建初始用户（非交互式版本）
 # ============================================================================
 
 create_initial_users() {
@@ -1429,20 +1445,56 @@ create_initial_users() {
     
     info "创建默认邮箱账户..."
     
+    # 生成随机密码函数
+    generate_password() {
+        # 生成16位随机密码
+        local password=$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)
+        echo "$password"
+    }
+    
+    # 创建密码记录文件
+    local password_file="/root/mail-passwords.txt"
+    cat > "$password_file" << EOF
+邮箱账户密码信息
+==================
+生成时间: $(date)
+域名: $DOMAIN
+服务器: $HOSTNAME
+
+重要：请立即修改这些默认密码！
+使用命令: mailuser passwd <用户名>
+
+账户信息：
+EOF
+    
     # 创建 admin 账户
-    echo "创建管理员邮箱 (admin@$DOMAIN)"
-    /usr/local/bin/mailuser add admin || warning "admin 用户创建失败"
+    local admin_password=$(generate_password)
+    echo "创建管理员邮箱 (admin@$DOMAIN)..."
+    /usr/local/bin/mailuser add admin "$admin_password"
+    echo "admin@$DOMAIN : $admin_password" >> "$password_file"
     
-    # 询问是否创建其他常用账户
+    # 创建 service 账户
     if confirm "是否创建 service@$DOMAIN 客服邮箱？" "Y"; then
-        /usr/local/bin/mailuser add service || warning "service 用户创建失败"
+        local service_password=$(generate_password)
+        echo "创建客服邮箱 (service@$DOMAIN)..."
+        /usr/local/bin/mailuser add service "$service_password"
+        echo "service@$DOMAIN : $service_password" >> "$password_file"
     fi
     
+    # 创建 noreply 账户
     if confirm "是否创建 noreply@$DOMAIN 系统发信邮箱？" "Y"; then
-        /usr/local/bin/mailuser add noreply || warning "noreply 用户创建失败"
+        local noreply_password=$(generate_password)
+        echo "创建系统邮箱 (noreply@$DOMAIN)..."
+        /usr/local/bin/mailuser add noreply "$noreply_password"
+        echo "noreply@$DOMAIN : $noreply_password" >> "$password_file"
     fi
+    
+    # 设置密码文件权限
+    chmod 600 "$password_file"
     
     success "初始账户创建完成"
+    print_color "$YELLOW" "⚠️  密码已保存到: $password_file"
+    print_color "$YELLOW" "⚠️  请立即查看并妥善保管密码信息！"
 }
 
 # ============================================================================
@@ -1456,13 +1508,19 @@ show_configuration() {
     
     # 提取 DKIM 记录 - 改进的提取方法
     if [[ -f "$dkim_file" ]]; then
-        # 从文件中提取完整的 DKIM 值（去除引号和括号）
-        dkim_record=$(cat "$dkim_file" | grep -v "^;" | tr -d '\n\t\r' | sed 's/.*IN[[:space:]]*TXT[[:space:]]*(//' | sed 's/)$//' | tr -d '"' | sed 's/[[:space:]]\+/ /g' | sed 's/^ //' | sed 's/ $//')
+        # 提取括号内的所有内容，去除引号、空格和注释
+        dkim_record=$(cat "$dkim_file" | \
+            sed -n '/IN[[:space:]]*TXT[[:space:]]*(/,/)/p' | \
+            sed 's/.*IN[[:space:]]*TXT[[:space:]]*(//' | \
+            sed 's/).*//' | \
+            tr -d '\n\t\r"' | \
+            sed 's/[[:space:]]\+//g' | \
+            sed 's/;.*$//')
         
-        # 如果上面的方法失败，尝试更简单的方法
-        if [[ -z "$dkim_record" ]] || [[ ! "$dkim_record" =~ ^v=DKIM1 ]]; then
-            # 提取所有引号内的内容并连接
-            dkim_record=$(grep -o '"[^"]*"' "$dkim_file" | tr -d '"' | tr -d '\n' | sed 's/[[:space:]]\+/ /g')
+        # 确保记录以 v=DKIM1 开始
+        if [[ ! "$dkim_record" =~ ^v=DKIM1 ]]; then
+            # 备用方法：直接提取引号内的内容
+            dkim_record=$(grep -o '"[^"]*"' "$dkim_file" | tr -d '"' | tr -d '\n\t ' | sed 's/[[:space:]]//g')
         fi
     fi
     
@@ -1501,17 +1559,15 @@ show_configuration() {
         echo "   值:   \"$dkim_record\""
         echo ""
         
-        # 特别为 Cloudflare 用户提供明确的复制区域
-        print_color "$YELLOW" "🔐 DKIM 记录详细信息（用于 Cloudflare DNS 配置）:"
+        # 为 Cloudflare 用户提供清晰的复制内容
+        print_color "$YELLOW" "📋 DKIM 记录（适用于 Cloudflare）:"
         echo "=================================================="
         echo "记录类型: TXT"
-        echo "名称/主机: mail._domainkey"
-        echo "内容/值（复制下面这行）:"
+        echo "名称: mail._domainkey"
+        echo "内容（请完整复制下面这行，不要包含引号）:"
         echo "----------------------------------------"
         echo "$dkim_record"
         echo "----------------------------------------"
-        echo ""
-        print_color "$YELLOW" "📋 请复制上面的完整 DKIM 值到 Cloudflare DNS 设置中！"
         echo ""
     else
         warning "DKIM 记录提取失败或 OpenDKIM 未正确配置"
@@ -1530,17 +1586,15 @@ show_configuration() {
     echo "已创建的邮箱账户:"
     /usr/local/bin/mailuser list
     echo ""
+    print_color "$YELLOW" "⚠️  账户密码已保存到: /root/mail-passwords.txt"
+    echo ""
     
     print_color "$BLUE" "🔧 管理命令"
     echo "邮箱管理:"
-    echo "  mailuser add <用户名>     - 添加邮箱"
-    echo "  mailuser passwd <用户名>  - 修改密码"
-    echo "  mailuser delete <用户名>  - 删除邮箱"
-    echo "  mailuser list            - 查看所有邮箱"
-    echo ""
-    
-    echo "DKIM 管理:"
-    echo "  cat /etc/opendkim/keys/$DOMAIN/mail.txt  - 查看原始 DKIM 记录文件"
+    echo "  mailuser add <用户名> [密码]  - 添加邮箱"
+    echo "  mailuser passwd <用户名>       - 修改密码"
+    echo "  mailuser delete <用户名>       - 删除邮箱"
+    echo "  mailuser list                  - 查看所有邮箱"
     echo ""
     
     print_color "$BLUE" "📱 客户端配置"
@@ -1560,7 +1614,7 @@ show_configuration() {
     echo "  用户名: 完整邮箱地址"
     echo ""
     
-    # 额外添加 DKIM 记录保存到文件，方便后续查看
+    # 保存清理后的 DKIM 记录
     if [[ -n "$dkim_record" ]] && [[ "$dkim_record" =~ ^v=DKIM1 ]]; then
         cat > /root/dkim-record.txt << EOF
 DKIM 记录配置信息
@@ -1570,19 +1624,19 @@ DKIM 记录配置信息
 主机名: $HOSTNAME
 生成时间: $(date)
 
-Cloudflare DNS 配置:
+DNS 配置:
 记录类型: TXT
 名称: mail._domainkey
 内容: $dkim_record
 
-完整记录文件位置: /etc/opendkim/keys/$DOMAIN/mail.txt
+原始记录文件: /etc/opendkim/keys/$DOMAIN/mail.txt
 EOF
         
-        print_color "$GREEN" "💾 DKIM 记录已保存到 /root/dkim-record.txt 方便后续查看"
+        print_color "$GREEN" "💾 DKIM 记录已保存到 /root/dkim-record.txt"
         echo ""
     fi
     
-    # 保存 DNS 配置信息到文件
+    # 保存 DNS 配置信息
     cat > /root/dns-config.txt << EOF
 DNS 配置记录
 ============
@@ -1625,13 +1679,14 @@ EOF
     
     print_color "$GREEN" "🎉 安装成功！请配置 DNS 记录后开始使用。"
     
-    # 显示关键的下一步操作
+    # 显示下一步操作
     print_color "$YELLOW" "📌 下一步操作："
-    echo "1. 将上述 DNS 记录添加到 Cloudflare 或您的 DNS 服务商"
-    echo "2. 等待 DNS 传播（通常需要几分钟到几小时）"
-    echo "3. 使用邮件客户端测试收发邮件"
-    echo "4. 可通过 https://mxtoolbox.com 测试 DNS 配置"
-    echo "5. 查看保存的配置: cat /root/dns-config.txt"
+    echo "1. 查看账户密码: cat /root/mail-passwords.txt"
+    echo "2. 将 DNS 记录添加到您的 DNS 服务商"
+    echo "3. 等待 DNS 传播（通常需要几分钟到几小时）"
+    echo "4. 使用邮件客户端测试收发邮件"
+    echo "5. 测试工具: https://mxtoolbox.com"
+    echo "6. 修改默认密码: mailuser passwd <用户名>"
 }
 
 # ============================================================================
@@ -1701,22 +1756,25 @@ main() {
 管理命令:
 - mailuser: 邮箱用户管理
 
+重要文件:
+- 账户密码: /root/mail-passwords.txt
+- DNS 配置: /root/dns-config.txt
+- DKIM 记录: /root/dkim-record.txt
+
 日志位置:
 - 邮件日志: /var/log/mail.log
 - 安装日志: $LOG_FILE
 
 配置备份: $BACKUP_DIR
-
-DNS 配置: /root/dns-config.txt
-DKIM 记录: /root/dkim-record.txt
 EOF
     
     log "安装完成"
     echo ""
-    print_color "$GREEN" "提示：配置信息已保存到以下文件："
-    echo "  - /root/mail-server-info.txt (服务器信息)"
+    print_color "$GREEN" "提示：重要配置文件："
+    echo "  - /root/mail-passwords.txt (账户密码)"
     echo "  - /root/dns-config.txt (DNS 配置)"
     echo "  - /root/dkim-record.txt (DKIM 记录)"
+    echo "  - /root/mail-server-info.txt (服务器信息)"
 }
 
 # ============================================================================
