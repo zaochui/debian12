@@ -129,7 +129,7 @@ get_server_ip() {
     
     # 如果没有有效的自定义IP，自动检测
     if [[ -z "$ip" ]]; then
-        info "自动检测服务器公网IP..."
+        log "自动检测服务器公网IP..."
         ip=$(curl -s -4 --connect-timeout 5 ifconfig.me || \
              curl -s -4 --connect-timeout 5 icanhazip.com || \
              curl -s -4 --connect-timeout 5 ipinfo.io/ip || \
@@ -428,16 +428,18 @@ check_dns() {
     print_color "$PURPLE" "  DNS 配置检查"
     print_color "$PURPLE" "========================================"
     
-    info "服务器公网 IP: $SERVER_IP"
+    info "当前服务器IP: $SERVER_IP"
     
     # 安装 DNS 工具（如果未安装）
     if ! command -v dig &> /dev/null; then
         info "安装 DNS 工具..."
-        apt-get install -y dnsutils
+        apt-get install -y dnsutils >/dev/null 2>&1
     fi
     
-    info "检查 DNS A 记录..."
-    DNS_IP=$(dig +short "$HOSTNAME" A 2>/dev/null | head -n1 | tr -d '[:space:]')
+    info "检查域名 $HOSTNAME 的 DNS A 记录..."
+    
+    # 获取DNS解析结果，清理格式
+    DNS_IP=$(dig +short "$HOSTNAME" A 2>/dev/null | head -n1 | tr -d '[:space:][:cntrl:]')
     
     if [[ -z "$DNS_IP" ]]; then
         warning "域名 $HOSTNAME 没有 DNS A 记录！"
@@ -454,31 +456,35 @@ check_dns() {
             exit 0
         fi
     else
-        # 输出调试信息
-        info "DNS 检查结果："
-        echo "  域名解析到: '$DNS_IP'"
-        echo "  服务器 IP:  '$SERVER_IP'"
-        
-        # 确保两个 IP 都已清理格式
-        DNS_IP_CLEAN=$(echo "$DNS_IP" | tr -d '[:space:][:cntrl:]')
+        # 清理服务器IP格式以便比较
         SERVER_IP_CLEAN=$(echo "$SERVER_IP" | tr -d '[:space:][:cntrl:]')
         
-        if [[ "$DNS_IP_CLEAN" != "$SERVER_IP_CLEAN" ]]; then
-            warning "DNS 解析不匹配！"
-            echo "域名 $HOSTNAME 解析到: $DNS_IP_CLEAN"
-            echo "当前服务器 IP: $SERVER_IP_CLEAN"
-            echo ""
+        echo "DNS 检查结果:"
+        echo "  域名 $HOSTNAME 解析到: $DNS_IP"
+        echo "  当前服务器IP: $SERVER_IP_CLEAN"
+        
+        if [[ "$DNS_IP" == "$SERVER_IP_CLEAN" ]]; then
+            success "DNS A 记录配置正确"
+        else
+            warning "DNS 解析结果与服务器IP不匹配"
+            echo
             echo "可能的原因："
-            echo "1. DNS 记录还没有完全传播"
-            echo "2. 域名指向了其他服务器"
-            echo "3. CDN 或负载均衡器在中间"
+            echo "1. DNS 记录还在传播中（可能需要几分钟到几小时）"
+            echo "2. 域名指向了其他服务器或CDN"
+            echo "3. 您的域名配置了负载均衡"
+            echo
             
-            if ! confirm "DNS 配置可能有误，是否继续安装？"; then
+            if confirm "忽略DNS不匹配继续安装？" "Y"; then
+                info "继续安装，请确保稍后验证DNS配置"
+            else
                 info "请先修正 DNS 配置后再运行脚本"
+                echo
+                echo "需要添加的DNS记录："
+                echo "类型: A"
+                echo "名称: $(echo $HOSTNAME | cut -d. -f1)" 
+                echo "值: $SERVER_IP_CLEAN"
                 exit 0
             fi
-        else
-            success "DNS A 记录正确: $DNS_IP_CLEAN"
         fi
     fi
 }
