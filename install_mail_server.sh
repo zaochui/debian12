@@ -352,7 +352,19 @@ configure_hostname() {
     print_color "$PURPLE" "\n========================================"
     print_color "$PURPLE" "  主机名配置"
     print_color "$PURPLE" "========================================"
-
+    
+    # 验证 FQDN 格式
+    is_valid_fqdn() {
+        local hostname=$1
+        if [[ "$hostname" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]] && \
+           [[ "$hostname" == *.* ]] && \
+           [[ ! "$hostname" =~ [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            return 0
+        else
+            return 1
+        fi
+    }
+    
     # 获取输入
     local current_hostname=$(hostname -f 2>/dev/null || hostname)
     info "当前主机名: $current_hostname"
@@ -1400,21 +1412,21 @@ show_configuration() {
     local dkim_record=""
     local dkim_file="/etc/opendkim/keys/$DOMAIN/mail.txt"
     
-    # 提取 DKIM 记录 - 改进的提取逻辑
+    # 提取 DKIM 记录
     if [[ -f "$dkim_file" ]]; then
-        # 读取完整文件内容，移除换行和多余空格
-        local file_content=$(cat "$dkim_file" 2>/dev/null | tr -d '\n\r' | sed 's/[[:space:]]\+/ /g')
+        # 提取完整的 DKIM 记录值
+        dkim_record=$(cat "$dkim_file" 2>/dev/null | grep -o 'v=DKIM1[^"]*' | head -1)
         
-        # 提取括号内的完整 DKIM 记录
-        if [[ "$file_content" =~ \(([^)]+)\) ]]; then
-            dkim_record="${BASH_REMATCH[1]}"
-            # 移除引号和多余的空格
-            dkim_record=$(echo "$dkim_record" | sed 's/"//g' | sed 's/[[:space:]]\+/ /g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        # 如果上面的方法失败，尝试另一种提取方式
+        if [[ -z "$dkim_record" ]]; then
+            dkim_record=$(cat "$dkim_file" 2>/dev/null | \
+                         sed -n 's/.*"\(v=DKIM1[^"]*\)".*/\1/p' | head -1)
         fi
         
-        # 如果还是没有提取到，尝试直接查找 v=DKIM1 开头的内容
+        # 最后的备用方法：提取括号内的内容
         if [[ -z "$dkim_record" ]]; then
-            dkim_record=$(echo "$file_content" | grep -oE 'v=DKIM1[^"]*' | head -1)
+            dkim_record=$(cat "$dkim_file" 2>/dev/null | \
+                         tr -d '\n' | sed 's/.*(\(.*\)).*/\1/' | tr -d ' \t\"')
         fi
     fi
     
@@ -1443,7 +1455,7 @@ show_configuration() {
     echo "3️⃣  SPF 记录:"
     echo "   类型: TXT"
     echo "   名称: @"
-    echo "   值:   \"v=spf1 mx a include:$HOSTNAME ~all\""
+    echo "   值:   \"v=spf1 mx a ip4:$SERVER_IP ~all\""
     echo ""
     
     if [[ -n "$dkim_record" ]]; then
@@ -1454,25 +1466,21 @@ show_configuration() {
         echo ""
         
         # 特别为 Cloudflare 用户提供明确的复制区域
-        print_color "$YELLOW" "🔐 DKIM 记录详细信息（直接复制到 Cloudflare）:"
+        print_color "$YELLOW" "🔐 DKIM 记录详细信息（用于 Cloudflare DNS 配置）:"
         echo "=================================================="
         echo "记录类型: TXT"
-        echo "名称: mail._domainkey"
-        echo "内容:"
+        echo "名称/主机: mail._domainkey"
+        echo "内容/值:"
         echo "----------------------------------------"
         echo "$dkim_record"
         echo "----------------------------------------"
-        print_color "$YELLOW" "📋 复制上面框内的完整内容到 Cloudflare DNS！"
+        echo ""
+        print_color "$YELLOW" "📋 复制上面的 DKIM 值到 Cloudflare DNS 设置中！"
         echo ""
     else
-        warning "DKIM 记录提取失败"
-        echo "请手动查看 DKIM 记录："
+        warning "未找到 DKIM 记录文件，请检查 OpenDKIM 配置"
+        echo "您可以稍后运行以下命令查看 DKIM 记录："
         echo "cat /etc/opendkim/keys/$DOMAIN/mail.txt"
-        echo ""
-        echo "手动提取方法："
-        echo "1. 找到 mail.txt 文件中括号 () 内的完整内容"
-        echo "2. 移除所有引号和换行符"
-        echo "3. 将结果作为 TXT 记录值添加到 mail._domainkey"
         echo ""
     fi
     
@@ -1543,9 +1551,8 @@ EOF
     print_color "$YELLOW" "📌 下一步操作："
     echo "1. 将上述 DNS 记录添加到 Cloudflare"
     echo "2. 等待 DNS 传播（通常需要几分钟到几小时）"
-    echo "3. 如果 admin 邮箱创建失败，请手动创建：mailuser add admin"
-    echo "4. 使用邮件客户端测试收发邮件"
-    echo "5. 可通过 https://mxtoolbox.com 测试 DNS 配置"
+    echo "3. 使用邮件客户端测试收发邮件"
+    echo "4. 可通过 https://mxtoolbox.com 测试 DNS 配置"
 }
 
 # ============================================================================
