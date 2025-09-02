@@ -428,11 +428,6 @@ check_dns() {
     print_color "$PURPLE" "  DNS 配置检查"
     print_color "$PURPLE" "========================================"
     
-    # 确保 SERVER_IP 已正确获取
-    if [[ -z "$SERVER_IP" ]]; then
-        SERVER_IP=$(get_server_ip)
-    fi
-    
     info "服务器公网 IP: $SERVER_IP"
     
     # 安装 DNS 工具（如果未安装）
@@ -442,7 +437,7 @@ check_dns() {
     fi
     
     info "检查 DNS A 记录..."
-    DNS_IP=$(dig +short "$HOSTNAME" A 2>/dev/null | head -n1 | tr -d '\n')
+    DNS_IP=$(dig +short "$HOSTNAME" A 2>/dev/null | head -n1 | tr -d '[:space:]')
     
     if [[ -z "$DNS_IP" ]]; then
         warning "域名 $HOSTNAME 没有 DNS A 记录！"
@@ -459,21 +454,31 @@ check_dns() {
             exit 0
         fi
     else
-        # 标准化 IP 格式（移除空格和换行符）
-        DNS_IP=$(echo "$DNS_IP" | tr -d '[:space:]')
-        SERVER_IP=$(echo "$SERVER_IP" | tr -d '[:space:]')
+        # 输出调试信息
+        info "DNS 检查结果："
+        echo "  域名解析到: '$DNS_IP'"
+        echo "  服务器 IP:  '$SERVER_IP'"
         
-        if [[ "$DNS_IP" != "$SERVER_IP" ]]; then
+        # 确保两个 IP 都已清理格式
+        DNS_IP_CLEAN=$(echo "$DNS_IP" | tr -d '[:space:][:cntrl:]')
+        SERVER_IP_CLEAN=$(echo "$SERVER_IP" | tr -d '[:space:][:cntrl:]')
+        
+        if [[ "$DNS_IP_CLEAN" != "$SERVER_IP_CLEAN" ]]; then
             warning "DNS 解析不匹配！"
-            echo "域名解析到: $DNS_IP"
-            echo "服务器 IP:  $SERVER_IP"
+            echo "域名 $HOSTNAME 解析到: $DNS_IP_CLEAN"
+            echo "当前服务器 IP: $SERVER_IP_CLEAN"
+            echo ""
+            echo "可能的原因："
+            echo "1. DNS 记录还没有完全传播"
+            echo "2. 域名指向了其他服务器"
+            echo "3. CDN 或负载均衡器在中间"
             
-            if ! confirm "DNS 配置可能有误，是否继续？"; then
-                info "请先修正 DNS 配置"
+            if ! confirm "DNS 配置可能有误，是否继续安装？"; then
+                info "请先修正 DNS 配置后再运行脚本"
                 exit 0
             fi
         else
-            success "DNS A 记录正确: $DNS_IP"
+            success "DNS A 记录正确: $DNS_IP_CLEAN"
         fi
     fi
 }
