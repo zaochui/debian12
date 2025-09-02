@@ -361,15 +361,14 @@ configure_hostname() {
     echo "邮件服务器需要一个正确的 FQDN，例如: mail.example.com"
     
     while true; do
-    read -p "请输入邮件服务器主机名: " HOSTNAME
-    
-    # 简单验证：必须包含点号且不是IP地址
-    if [[ "$HOSTNAME" == *.* ]] && [[ ! "$HOSTNAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        break
-    else
-        warning "主机名格式无效。必须是类似 mail.example.com 的 FQDN（包含域名）"
-    fi
-done
+        read -p "请输入邮件服务器主机名: " HOSTNAME
+        
+        if is_valid_fqdn "$HOSTNAME"; then
+            break
+        else
+            warning "主机名格式无效。必须是类似 mail.example.com 的 FQDN"
+        fi
+    done
     
     # 提取域名
     DOMAIN=$(echo "$HOSTNAME" | cut -d. -f2-)
