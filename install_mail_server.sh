@@ -354,7 +354,8 @@ configure_hostname() {
     print_color "$PURPLE" "========================================"
     
     # 验证 FQDN 格式
-    is_valid_fqdn() {
+    # 验证 FQDN 格式
+is_valid_fqdn() {
     local hostname=$1
     # 简化正则表达式，避免括号冲突
     if [[ "$hostname" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]{0,61}[a-zA-Z0-9]$ ]] && \
