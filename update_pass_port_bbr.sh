@@ -1,389 +1,454 @@
 #!/bin/bash
 
-# Debian 12 一键优化配置脚本
-# 功能：修改用户密码、修改SSH端口、系统更新、配置主机名、安装工具、安装BBR
-# 作者：System Admin Tools
-# 版本：2.2
+# ============================================================================
+# Debian 12 系统优化配置脚本 v4.0
+# 功能：系统更新、密码修改、SSH配置、主机名设置、工具安装、BBR优化
+# 特性：强大的APT修复机制、智能错误处理、分步安装
+# ============================================================================
 
-set -e
+# 确保使用完整PATH
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# 严格错误处理
+set -euo pipefail
+trap 'error_handler $? $LINENO' ERR
 
 # 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# 打印带颜色的信息
-print_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
+# 日志函数
+log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+log_step() { echo -e "\n${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n${MAGENTA}[步骤]${NC} $1\n${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; }
+log_success() { echo -e "${CYAN}✅${NC} $1"; }
 
-print_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
+# 全局变量
+SCRIPT_VERSION="4.0"
+SYSTEM_INFO=""
+KERNEL_VERSION=""
+HAS_BBR_SUPPORT=false
+SERVER_IP=""
+SSH_PORT="22"
+NEW_HOSTNAME=""
+APT_FIXED=false
+INSTALL_LOG="/var/log/debian_setup.log"
 
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-# 检查是否为root用户或使用sudo
-check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        print_error "此脚本必须以root权限运行"
-        print_info "请使用: sudo bash $0"
-        exit 1
+# 错误处理函数
+error_handler() {
+    local exit_code=$1
+    local line_no=$2
+    if [ $exit_code -ne 0 ]; then
+        log_error "脚本在第 $line_no 行发生错误 (错误码: $exit_code)"
+        log_info "如遇问题，查看日志: $INSTALL_LOG"
     fi
 }
 
-# 检查系统是否为Debian 12
+# 初始化日志
+init_log() {
+    echo "=== Debian Setup Script v$SCRIPT_VERSION - $(date) ===" >> "$INSTALL_LOG"
+    log_info "脚本开始执行，日志文件: $INSTALL_LOG"
+}
+
+# 检查root权限
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        log_error "请以 root 用户运行此脚本"
+        log_info "使用: sudo bash $0"
+        exit 1
+    fi
+    log_success "Root权限检查通过"
+}
+
+# 检查系统版本
 check_system() {
+    log_step "系统环境检查"
+    
+    # 获取系统信息
     if [ -f /etc/os-release ]; then
         . /etc/os-release
-        if [[ "$ID" != "debian" ]] || [[ "$VERSION_ID" != "12" ]]; then
-            print_warning "此脚本专为 Debian 12 设计，当前系统：$ID $VERSION_ID"
+        SYSTEM_INFO="$PRETTY_NAME"
+        log_info "系统版本: $SYSTEM_INFO"
+        
+        # 检查是否为Debian
+        if [[ "$ID" != "debian" ]]; then
+            log_warn "此脚本专为 Debian 设计，当前系统: $ID"
             read -p "是否继续？(y/n): " -n 1 -r
             echo
             if [[ ! $REPLY =~ ^[Yy]$ ]]; then
                 exit 1
             fi
         fi
-    else
-        print_error "无法确定操作系统版本"
-        exit 1
     fi
+    
+    # 检查内核版本
+    KERNEL_VERSION=$(uname -r)
+    log_info "内核版本: $KERNEL_VERSION"
+    
+    # 提取主版本号检查BBR支持
+    KERNEL_MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1)
+    KERNEL_MINOR=$(echo "$KERNEL_VERSION" | cut -d. -f2)
+    
+    if [ "$KERNEL_MAJOR" -gt 4 ] || ([ "$KERNEL_MAJOR" -eq 4 ] && [ "$KERNEL_MINOR" -ge 9 ]); then
+        HAS_BBR_SUPPORT=true
+        log_info "内核支持 BBR 加速"
+    else
+        HAS_BBR_SUPPORT=false
+        log_warn "当前内核不支持 BBR (需要 4.9+)"
+    fi
+    
+    # 获取服务器IP
+    SERVER_IP=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -1)
+    if [ -z "$SERVER_IP" ]; then
+        SERVER_IP=$(curl -s -4 ifconfig.me 2>/dev/null || wget -qO- -4 ifconfig.me 2>/dev/null || echo "未知")
+    fi
+    log_info "服务器IP: $SERVER_IP"
 }
 
-# 1. 修改当前用户密码
-change_user_password() {
-    print_info "========== 修改用户密码 =========="
+# 深度修复APT系统（参考附件的方法）
+deep_fix_apt() {
+    log_step "深度修复APT系统"
     
-    # 获取当前实际用户（处理sudo情况）
-    if [ -n "$SUDO_USER" ]; then
+    # 1. 停止占用的apt进程
+    log_info "停止占用的APT进程..."
+    killall apt apt-get 2>/dev/null || true
+    
+    # 2. 清理锁文件
+    log_info "清理APT锁文件..."
+    rm -f /var/lib/apt/lists/lock
+    rm -f /var/cache/apt/archives/lock
+    rm -f /var/lib/dpkg/lock*
+    dpkg --configure -a 2>/dev/null || true
+    
+    # 3. 彻底清理缓存
+    log_info "彻底清理APT缓存..."
+    apt-get clean
+    apt-get autoclean
+    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/cache/apt/*.bin
+    mkdir -p /var/lib/apt/lists/partial
+    
+    # 4. 备份并重建sources.list
+    if [ ! -f /etc/apt/sources.list.original ]; then
+        cp /etc/apt/sources.list /etc/apt/sources.list.original 2>/dev/null || true
+    fi
+    cp /etc/apt/sources.list /etc/apt/sources.list.backup.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
+    
+    # 5. 尝试多个镜像源
+    local mirrors=(
+        "deb.debian.org"
+        "cdn-fastly.deb.debian.org"
+        "ftp.debian.org"
+        "mirror.xtom.com/debian"
+    )
+    
+    local success=false
+    for mirror in "${mirrors[@]}"; do
+        log_info "尝试使用镜像: $mirror"
+        
+        # 生成sources.list
+        cat > /etc/apt/sources.list << EOF
+deb http://${mirror}/debian/ bookworm main contrib non-free non-free-firmware
+deb-src http://${mirror}/debian/ bookworm main contrib non-free non-free-firmware
+
+deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
+deb-src http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
+
+deb http://${mirror}/debian/ bookworm-updates main contrib non-free non-free-firmware
+deb-src http://${mirror}/debian/ bookworm-updates main contrib non-free non-free-firmware
+EOF
+        
+        # 测试更新
+        if apt-get update 2>&1 | tee -a "$INSTALL_LOG"; then
+            success=true
+            log_success "成功使用镜像: $mirror"
+            break
+        else
+            log_warn "镜像 $mirror 失败，尝试下一个..."
+        fi
+    done
+    
+    if [ "$success" = false ]; then
+        log_error "所有镜像源都失败了"
+        log_info "尝试使用最小化配置..."
+        cat > /etc/apt/sources.list << EOF
+deb http://deb.debian.org/debian/ bookworm main
+deb http://security.debian.org/debian-security bookworm-security main
+EOF
+        apt-get update || {
+            log_error "APT修复失败，请检查网络连接"
+            return 1
+        }
+    fi
+    
+    # 6. 修复损坏的包
+    log_info "修复可能损坏的包..."
+    apt-get --fix-broken install -y 2>/dev/null || true
+    dpkg --configure -a 2>/dev/null || true
+    
+    # 7. 清理并更新
+    apt-get autoremove --purge -y 2>/dev/null || true
+    
+    APT_FIXED=true
+    log_success "APT系统修复完成！"
+}
+
+# 系统全量更新
+full_system_update() {
+    log_step "执行系统更新"
+    
+    # 确保APT正常
+    if [ "$APT_FIXED" = false ]; then
+        deep_fix_apt
+    fi
+    
+    log_info "更新软件包列表..."
+    apt-get update || {
+        log_warn "更新失败，尝试修复..."
+        deep_fix_apt
+        apt-get update
+    }
+    
+    log_info "升级已安装的软件包..."
+    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --allow-downgrades || {
+        log_warn "升级失败，尝试修复..."
+        apt-get --fix-broken install -y
+        DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+    }
+    
+    log_info "执行深度升级..."
+    DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y || log_warn "深度升级部分失败"
+    
+    log_info "清理不需要的软件包..."
+    apt-get autoremove --purge -y
+    apt-get autoclean
+    apt-get clean
+    
+    # 清理系统日志（保留7天）
+    log_info "清理系统日志..."
+    journalctl --vacuum-time=7d 2>/dev/null || true
+    
+    # 清理临时文件
+    find /tmp -type f -atime +7 -delete 2>/dev/null || true
+    find /var/tmp -type f -atime +7 -delete 2>/dev/null || true
+    
+    log_success "系统更新完成"
+}
+
+# 修改用户密码
+change_user_password() {
+    log_step "修改用户密码"
+    
+    # 获取当前用户
+    local CURRENT_USER
+    if [ -n "${SUDO_USER:-}" ]; then
         CURRENT_USER=$SUDO_USER
     else
         CURRENT_USER=$(whoami)
     fi
     
-    print_info "当前用户: $CURRENT_USER"
+    log_info "当前用户: $CURRENT_USER"
     
-    # 循环直到密码设置成功
-    while true; do
-        print_info "请输入新密码（密码输入时不会显示）："
+    read -p "是否修改密码？(y/n): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        log_info "跳过密码修改"
+        return
+    fi
+    
+    local password_set=false
+    while [ "$password_set" = false ]; do
+        echo -e "${YELLOW}请输入新密码（不显示）:${NC}"
         read -s PASSWORD1
         echo
         
-        # 检查密码是否为空
         if [ -z "$PASSWORD1" ]; then
-            print_error "密码不能为空，请重新输入"
+            log_error "密码不能为空"
             continue
         fi
         
-        print_info "请再次输入新密码："
+        if [ ${#PASSWORD1} -lt 8 ]; then
+            log_error "密码长度至少8个字符"
+            continue
+        fi
+        
+        echo -e "${YELLOW}请再次输入新密码:${NC}"
         read -s PASSWORD2
         echo
         
-        # 检查两次密码是否一致
         if [ "$PASSWORD1" != "$PASSWORD2" ]; then
-            print_error "两次输入的密码不一致，请重新输入"
+            log_error "两次密码不一致"
             continue
         fi
         
-        # 修改密码
         echo "$CURRENT_USER:$PASSWORD1" | chpasswd
         if [ $? -eq 0 ]; then
-            print_success "用户 $CURRENT_USER 的密码修改成功"
-            break
+            log_success "密码修改成功"
+            password_set=true
         else
-            print_error "密码修改失败，请重试"
+            log_error "密码修改失败"
         fi
     done
 }
 
-# 2. 修改SSH端口
+# 修改SSH端口
 change_ssh_port() {
-    print_info "========== 修改SSH端口 =========="
+    log_step "配置SSH端口"
     
-    SSHD_CONFIG="/etc/ssh/sshd_config"
+    local SSHD_CONFIG="/etc/ssh/sshd_config"
     
-    # 备份原配置文件
-    if [ ! -f "${SSHD_CONFIG}.bak" ]; then
-        cp $SSHD_CONFIG ${SSHD_CONFIG}.bak
-        print_info "已备份SSH配置文件到 ${SSHD_CONFIG}.bak"
+    # 备份SSH配置
+    if [ ! -f "${SSHD_CONFIG}.original" ]; then
+        cp "$SSHD_CONFIG" "${SSHD_CONFIG}.original"
+    fi
+    cp "$SSHD_CONFIG" "${SSHD_CONFIG}.bak.$(date +%Y%m%d_%H%M%S)"
+    
+    # 获取当前端口
+    local CURRENT_PORT=$(grep "^Port\|^#Port" "$SSHD_CONFIG" 2>/dev/null | awk '{print $2}' | head -1)
+    CURRENT_PORT=${CURRENT_PORT:-22}
+    
+    log_info "当前SSH端口: $CURRENT_PORT"
+    
+    read -p "是否修改SSH端口？(y/n): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        SSH_PORT=$CURRENT_PORT
+        return
     fi
     
-    # 获取当前SSH端口
-    CURRENT_PORT=$(grep "^Port\|^#Port" $SSHD_CONFIG | awk '{print $2}' | head -1)
-    if [ -z "$CURRENT_PORT" ]; then
-        CURRENT_PORT=22
-    fi
-    
-    print_info "当前SSH端口: $CURRENT_PORT"
-    
-    # 输入新端口
     while true; do
         read -p "请输入新的SSH端口 (1-65535): " NEW_PORT
         
-        # 验证端口号
         if ! [[ "$NEW_PORT" =~ ^[0-9]+$ ]]; then
-            print_error "端口必须是数字"
+            log_error "端口必须是数字"
             continue
         fi
         
-        if [ $NEW_PORT -lt 1 ] || [ $NEW_PORT -gt 65535 ]; then
-            print_error "端口必须在1-65535之间"
+        if [ "$NEW_PORT" -lt 1 ] || [ "$NEW_PORT" -gt 65535 ]; then
+            log_error "端口范围: 1-65535"
             continue
         fi
         
-        # 对于低端口给出提醒
-        if [ $NEW_PORT -lt 1024 ]; then
-            print_warning "端口 $NEW_PORT 是系统保留端口（<1024），通常用于系统服务"
-            read -p "确定要使用此端口吗？(y/n): " -n 1 -r
-            echo
-            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                continue
-            fi
-        fi
-        
-        # 检查端口是否被占用
+        # 检查端口占用
         if ss -tuln | grep -q ":$NEW_PORT "; then
-            print_error "端口 $NEW_PORT 已被占用，请选择其他端口"
+            log_error "端口 $NEW_PORT 已被占用"
             continue
         fi
         
-        # 对一些常用端口给出警告
-        case $NEW_PORT in
-            80|443|21|25|110|143|3306|5432|6379|27017)
-                print_warning "端口 $NEW_PORT 通常用于其他服务（HTTP/HTTPS/FTP/Mail/Database等）"
-                read -p "确定要使用此端口吗？(y/n): " -n 1 -r
-                echo
-                if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                    continue
-                fi
-                ;;
-        esac
-        
+        SSH_PORT=$NEW_PORT
         break
     done
     
     # 修改SSH配置
-    sed -i "s/^#\?Port .*/Port $NEW_PORT/" $SSHD_CONFIG
+    sed -i "s/^#\?Port .*/Port $SSH_PORT/" "$SSHD_CONFIG"
     
-    # 配置防火墙（如果安装了ufw）
-    if command -v ufw &> /dev/null; then
-        print_info "配置防火墙规则..."
-        ufw allow $NEW_PORT/tcp
-        if [ "$CURRENT_PORT" != "$NEW_PORT" ]; then
-            print_warning "记得稍后删除旧端口的防火墙规则: ufw delete allow $CURRENT_PORT/tcp"
-        fi
-    fi
-    
-    # 重启SSH服务
-    print_info "重启SSH服务..."
-    systemctl restart sshd || systemctl restart ssh
-    
-    if [ $? -eq 0 ]; then
-        print_success "SSH端口已成功修改为: $NEW_PORT"
-        print_warning "请记住新端口号！下次连接请使用: ssh -p $NEW_PORT user@host"
+    # 测试配置
+    if sshd -t 2>/dev/null; then
+        systemctl restart sshd || systemctl restart ssh
+        log_success "SSH端口已修改为: $SSH_PORT"
     else
-        print_error "SSH服务重启失败，请检查配置"
+        log_error "SSH配置错误，恢复原配置"
+        cp "${SSHD_CONFIG}.bak.$(date +%Y%m%d_%H%M%S)" "$SSHD_CONFIG"
+        SSH_PORT=$CURRENT_PORT
     fi
 }
 
-# 3. 系统更新和清理
-system_update_cleanup() {
-    print_info "========== 系统更新和清理 =========="
-    
-    print_info "更新软件包列表..."
-    apt update
-    
-    print_info "升级所有软件包..."
-    DEBIAN_FRONTEND=noninteractive apt upgrade -y
-    
-    print_info "执行完整系统升级..."
-    DEBIAN_FRONTEND=noninteractive apt full-upgrade -y
-    
-    print_info "清理不需要的软件包..."
-    apt autoremove -y
-    
-    print_info "清理软件包缓存..."
-    apt autoclean
-    apt clean
-    
-    # 清理系统日志（保留最近7天）
-    print_info "清理系统日志..."
-    journalctl --vacuum-time=7d
-    
-    # 清理临时文件
-    print_info "清理临时文件..."
-    find /tmp -type f -atime +7 -delete 2>/dev/null || true
-    find /var/tmp -type f -atime +7 -delete 2>/dev/null || true
-    
-    print_success "系统更新和清理完成"
-}
-
-# 4. 配置主机名
+# 配置主机名
 configure_hostname() {
-    print_info "========== 配置主机名 =========="
+    log_step "配置主机名"
     
-    # 显示当前主机名
-    CURRENT_HOSTNAME=$(hostname)
-    CURRENT_FQDN=$(hostname -f 2>/dev/null || hostname)
-    print_info "当前主机名: $CURRENT_HOSTNAME"
-    print_info "当前FQDN: $CURRENT_FQDN"
+    local CURRENT_HOSTNAME=$(hostname)
+    local CURRENT_FQDN=$(hostname -f 2>/dev/null || hostname)
     
-    read -p "是否要修改主机名？(y/n): " -n 1 -r
+    log_info "当前主机名: $CURRENT_HOSTNAME"
+    log_info "当前FQDN: $CURRENT_FQDN"
+    
+    read -p "是否修改主机名？(y/n): " -n 1 -r
     echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        read -p "请输入新的主机名 (例如: server.domain.com): " NEW_HOSTNAME
-        
-        if [ -z "$NEW_HOSTNAME" ]; then
-            print_error "主机名不能为空"
-            return 1
-        fi
-        
-        # 获取短主机名
-        SHORT_HOSTNAME=$(echo $NEW_HOSTNAME | cut -d. -f1)
-        
-        # 设置主机名
-        print_info "设置主机名为: $NEW_HOSTNAME"
-        hostnamectl set-hostname $NEW_HOSTNAME
-        
-        # 同时更新 /etc/hostname
-        echo "$SHORT_HOSTNAME" > /etc/hostname
-        
-        # 获取服务器IP
-        SERVER_IP=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -1)
-        if [ -z "$SERVER_IP" ]; then
-            read -p "请输入服务器的公网IP地址: " SERVER_IP
-        else
-            print_info "检测到的服务器IP: $SERVER_IP"
-            read -p "是否使用此IP？(y/n): " -n 1 -r
-            echo
-            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                read -p "请输入正确的服务器IP地址: " SERVER_IP
-            fi
-        fi
-        
-        # 备份 hosts 文件
-        cp /etc/hosts /etc/hosts.bak.$(date +%Y%m%d_%H%M%S)
-        print_info "已备份 /etc/hosts 到 /etc/hosts.bak.$(date +%Y%m%d_%H%M%S)"
-        
-        # 更新 /etc/hosts
-        print_info "更新 /etc/hosts 文件..."
-        
-        # 创建新的 hosts 文件内容
-        {
-            echo "127.0.0.1   localhost"
-            echo "127.0.1.1   $SHORT_HOSTNAME"
-            echo "$SERVER_IP   $NEW_HOSTNAME $SHORT_HOSTNAME"
-            echo ""
-            echo "# The following lines are desirable for IPv6 capable hosts"
-            echo "::1     localhost ip6-localhost ip6-loopback"
-            echo "ff02::1 ip6-allnodes"
-            echo "ff02::2 ip6-allrouters"
-        } > /etc/hosts.new
-        
-        # 保留原文件中的其他自定义条目（排除旧主机名相关的）
-        if [ -f /etc/hosts ]; then
-            grep -v -E "^[^#].*($CURRENT_HOSTNAME|$CURRENT_FQDN|localhost)" /etc/hosts | \
-            grep -v -E "^(127\.0\.0\.1|127\.0\.1\.1|::1|ff02::)" | \
-            grep -v "^$" >> /etc/hosts.new || true
-        fi
-        
-        # 替换原文件
-        mv /etc/hosts.new /etc/hosts
-        
-        print_success "主机名已成功设置为: $NEW_HOSTNAME"
-        print_info "/etc/hostname 内容: $(cat /etc/hostname)"
-        print_info "/etc/hosts 相关条目:"
-        grep -E "$NEW_HOSTNAME|$SHORT_HOSTNAME" /etc/hosts
-        
-        # 验证设置
-        print_info "验证主机名设置..."
-        print_info "hostname 命令: $(hostname)"
-        print_info "hostname -f 命令: $(hostname -f 2>/dev/null || echo '无法获取FQDN')"
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        return
     fi
+    
+    read -p "请输入新的主机名 (如: server.domain.com): " NEW_HOSTNAME
+    
+    if [ -z "$NEW_HOSTNAME" ]; then
+        log_error "主机名不能为空"
+        return
+    fi
+    
+    # 获取短主机名
+    local SHORT_HOSTNAME=$(echo "$NEW_HOSTNAME" | cut -d. -f1)
+    
+    # 设置主机名
+    hostnamectl set-hostname "$NEW_HOSTNAME" 2>/dev/null || hostname "$NEW_HOSTNAME"
+    echo "$SHORT_HOSTNAME" > /etc/hostname
+    
+    # 备份并更新hosts文件
+    cp /etc/hosts /etc/hosts.bak.$(date +%Y%m%d_%H%M%S)
+    
+    # 重建hosts文件
+    {
+        echo "127.0.0.1   localhost"
+        echo "127.0.1.1   $SHORT_HOSTNAME"
+        echo "$SERVER_IP   $NEW_HOSTNAME $SHORT_HOSTNAME"
+        echo ""
+        echo "# IPv6"
+        echo "::1     localhost ip6-localhost ip6-loopback"
+        echo "ff02::1 ip6-allnodes"
+        echo "ff02::2 ip6-allrouters"
+    } > /etc/hosts.new
+    
+    # 保留其他自定义条目
+    if [ -f /etc/hosts.bak.$(date +%Y%m%d_%H%M%S) ]; then
+        grep -v -E "^[^#].*(localhost|$CURRENT_HOSTNAME|$CURRENT_FQDN|127\.0\.|::1|ff02::)" /etc/hosts.bak.$(date +%Y%m%d_%H%M%S) 2>/dev/null >> /etc/hosts.new || true
+    fi
+    
+    mv /etc/hosts.new /etc/hosts
+    
+    log_success "主机名已设置为: $NEW_HOSTNAME"
+    log_info "验证: $(hostname -f 2>/dev/null || hostname)"
 }
 
-# 5. 安装必要工具和常用命令
+# 安装必要工具（智能分批安装）
 install_essential_tools() {
-    print_info "========== 安装必要工具和常用命令 =========="
+    log_step "安装必要工具和常用命令"
     
-    print_info "安装基础工具包..."
-    apt install -y \
-        wget \
-        curl \
-        git \
-        vim \
-        nano \
-        sudo \
-        net-tools \
-        dnsutils \
-        software-properties-common \
-        apt-transport-https \
-        ca-certificates \
-        gnupg \
-        lsb-release \
-        unzip \
-        zip \
-        tar \
-        gzip \
-        bzip2 \
-        xz-utils
+    # 确保APT正常
+    if [ "$APT_FIXED" = false ]; then
+        deep_fix_apt
+    fi
     
-    print_info "安装系统监控工具..."
-    apt install -y \
-        htop \
-        iotop \
-        iftop \
-        nethogs \
-        ncdu \
-        tmux \
-        screen || print_warning "部分监控工具安装失败，继续..."
+    # 定义工具包组
+    declare -A tool_groups=(
+        ["核心工具"]="wget curl nano tar gzip bzip2 xz-utils ca-certificates gnupg"
+        ["系统工具"]="sudo net-tools dnsutils htop iotop iftop ncdu tree jq"
+        ["开发工具"]="git vim build-essential make gcc g++ python3 python3-pip"
+        ["网络工具"]="iputils-ping traceroute mtr nmap tcpdump netcat-openbsd whois"
+        ["其他工具"]="rsync tmux screen neofetch bash-completion"
+    )
     
-    print_info "安装网络工具..."
-    apt install -y \
-        iputils-ping \
-        traceroute \
-        mtr \
-        nmap \
-        telnet \
-        tcpdump \
-        netcat-openbsd \
-        socat \
-        dnsutils \
-        whois || print_warning "部分网络工具安装失败，继续..."
+    # 分组安装
+    for group in "${!tool_groups[@]}"; do
+        log_info "安装${group}..."
+        for tool in ${tool_groups[$group]}; do
+            if ! dpkg -l | grep -q "^ii.*$tool"; then
+                apt-get install -y "$tool" 2>/dev/null || {
+                    log_warn "⚠ $tool 安装失败，跳过"
+                    echo "$tool install failed" >> "$INSTALL_LOG"
+                }
+            fi
+        done
+    done
     
-    print_info "安装开发工具..."
-    apt install -y \
-        build-essential \
-        make \
-        gcc \
-        g++ \
-        python3 \
-        python3-pip \
-        nodejs \
-        npm || print_warning "部分开发工具安装失败，继续..."
-    
-    print_info "安装其他实用工具..."
-    apt install -y \
-        rsync \
-        cron \
-        logrotate \
-        bash-completion \
-        command-not-found \
-        tree \
-        jq \
-        neofetch \
-        ncurses-term || print_warning "部分实用工具安装失败，继续..."
-    
-    # 配置 vim 基础设置
-    cat > /etc/vim/vimrc.local << 'EOF'
+    # 配置vim
+    if command -v vim &>/dev/null; then
+        cat > /etc/vim/vimrc.local << 'EOF'
 set number
 set autoindent
 set tabstop=4
@@ -392,9 +457,12 @@ set expandtab
 set paste
 syntax on
 EOF
+        log_success "Vim配置完成"
+    fi
     
-    # 配置 bash 别名
-    cat >> /etc/bash.bashrc << 'EOF'
+    # 配置bash别名
+    if ! grep -q "# Custom aliases" /etc/bash.bashrc; then
+        cat >> /etc/bash.bashrc << 'EOF'
 
 # Custom aliases
 alias ll='ls -alF'
@@ -406,123 +474,159 @@ alias grep='grep --color=auto'
 alias df='df -h'
 alias du='du -h'
 alias free='free -h'
-alias top='htop'
 alias ports='netstat -tulanp'
 EOF
+        
+        # 如果安装了htop，添加别名
+        if command -v htop &>/dev/null; then
+            echo "alias top='htop'" >> /etc/bash.bashrc
+        fi
+        
+        log_success "Bash别名配置完成"
+    fi
     
-    print_success "必要工具和常用命令安装完成"
+    log_success "工具安装完成"
 }
 
-# 6. 安装和启用BBR
+# 配置BBR加速
 install_bbr() {
-    print_info "========== 安装BBR =========="
+    log_step "配置BBR网络加速"
     
-    # 检查内核版本（BBR需要4.9+）
-    KERNEL_VERSION=$(uname -r | cut -d. -f1,2)
-    KERNEL_MAJOR=$(echo $KERNEL_VERSION | cut -d. -f1)
-    KERNEL_MINOR=$(echo $KERNEL_VERSION | cut -d. -f2)
-    
-    if [ "$KERNEL_MAJOR" -lt 4 ] || ([ "$KERNEL_MAJOR" -eq 4 ] && [ "$KERNEL_MINOR" -lt 9 ]); then
-        print_error "BBR需要Linux内核4.9或更高版本，当前版本: $(uname -r)"
-        print_info "请先升级内核"
-        return 1
+    if [ "$HAS_BBR_SUPPORT" = false ]; then
+        log_warn "当前内核不支持BBR，需要内核4.9+"
+        return
     fi
     
-    # 检查BBR是否已启用
+    # 检查是否已启用
     if lsmod | grep -q bbr; then
-        print_info "BBR已经启用"
-        sysctl net.ipv4.tcp_congestion_control
-        return 0
+        log_info "BBR已经启用"
+        return
     fi
     
-    # 启用BBR
-    print_info "配置BBR..."
+    log_info "启用BBR..."
     
-    # 添加BBR配置到sysctl.conf
-    cat >> /etc/sysctl.conf << EOF
+    # 加载BBR模块
+    modprobe tcp_bbr 2>/dev/null || true
+    
+    # 添加BBR配置
+    cat >> /etc/sysctl.conf << 'EOF'
 
 # BBR Configuration
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
+
+# Network Optimization
+net.core.somaxconn=4096
+net.ipv4.tcp_max_syn_backlog=8192
+net.core.netdev_max_backlog=16384
+net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_fin_timeout=30
+net.ipv4.tcp_keepalive_time=1200
+
+# Memory Optimization
+vm.swappiness=10
+vm.dirty_ratio=30
+vm.dirty_background_ratio=5
 EOF
     
     # 应用配置
-    sysctl -p
+    sysctl -p 2>/dev/null || log_warn "部分系统参数应用失败"
     
-    # 验证BBR是否启用
-    if lsmod | grep -q bbr; then
-        print_success "BBR已成功启用"
-        sysctl net.ipv4.tcp_congestion_control
-        sysctl net.core.default_qdisc
+    # 验证BBR
+    if sysctl net.ipv4.tcp_congestion_control | grep -q bbr; then
+        log_success "BBR已成功启用"
     else
-        print_error "BBR启用失败"
-        return 1
+        log_warn "BBR启用失败"
     fi
 }
 
 # 显示系统信息
 show_system_info() {
-    print_info "========== 系统信息 =========="
-    echo "主机名: $(hostname)"
-    echo "FQDN: $(hostname -f 2>/dev/null || echo 'N/A')"
-    echo "系统版本: $(cat /etc/os-release | grep PRETTY_NAME | cut -d'"' -f2)"
-    echo "内核版本: $(uname -r)"
-    echo "CPU: $(lscpu | grep 'Model name' | cut -d':' -f2 | xargs)"
-    echo "内存: $(free -h | grep Mem | awk '{print $2}')"
-    echo "磁盘: $(df -h / | tail -1 | awk '{print $2}')"
-    echo "IP地址: $(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -1)"
-    echo "当前时间: $(date '+%Y-%m-%d %H:%M:%S')"
-    echo ""
-    print_info "/etc/hosts 文件内容:"
-    cat /etc/hosts
+    log_step "系统信息汇总"
+    
+    echo -e "${GREEN}系统信息:${NC}"
+    echo "  主机名: $(hostname -f 2>/dev/null || hostname)"
+    echo "  系统: $SYSTEM_INFO"
+    echo "  内核: $KERNEL_VERSION"
+    echo "  CPU: $(lscpu | grep 'Model name' | cut -d':' -f2 | xargs)"
+    echo "  内存: $(free -h | grep Mem | awk '{print $2}')"
+    echo "  磁盘: $(df -h / | tail -1 | awk '{print $2" 使用 "$3" ("$5")"}')"
+    echo "  IP地址: $SERVER_IP"
+    echo "  SSH端口: $SSH_PORT"
+    
+    if [ "$HAS_BBR_SUPPORT" = true ] && lsmod | grep -q bbr; then
+        echo "  BBR状态: 已启用"
+    else
+        echo "  BBR状态: 未启用"
+    fi
+    
+    # 保存配置信息
+    cat > /root/server_config.txt << EOF
+========================================
+Debian 12 系统配置信息
+========================================
+配置时间: $(date)
+脚本版本: v$SCRIPT_VERSION
+服务器IP: $SERVER_IP
+SSH端口: $SSH_PORT
+主机名: $(hostname -f 2>/dev/null || hostname)
+内核版本: $KERNEL_VERSION
+BBR状态: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "未启用")
+
+SSH连接:
+ssh -p $SSH_PORT root@$SERVER_IP
+
+配置日志: $INSTALL_LOG
+========================================
+EOF
+    
+    log_success "配置信息已保存到: /root/server_config.txt"
 }
 
 # 主菜单
 main_menu() {
     clear
-    echo "╔══════════════════════════════════════════════╗"
-    echo "║     Debian 12 系统优化配置脚本 v2.2          ║"
-    echo "╚══════════════════════════════════════════════╝"
-    echo ""
-    echo "请选择要执行的操作："
-    echo "1) 执行全部优化（推荐）"
-    echo "2) 修改用户密码"
-    echo "3) 修改SSH端口"
-    echo "4) 系统更新和清理"
-    echo "5) 配置主机名"
-    echo "6) 安装必要工具"
-    echo "7) 安装BBR加速"
-    echo "8) 显示系统信息"
-    echo "0) 退出"
-    echo ""
-    read -p "请输入选项 [0-8]: " choice
+    echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗"
+    echo -e "║     Debian 12 系统优化配置脚本 v${SCRIPT_VERSION}          ║"
+    echo -e "╚══════════════════════════════════════════════════════════╝${NC}"
+    echo
+    echo "请选择操作:"
+    echo "  1) 执行完整优化（推荐）"
+    echo "  2) 修复APT并更新系统"
+    echo "  3) 修改用户密码"
+    echo "  4) 修改SSH端口"
+    echo "  5) 配置主机名"
+    echo "  6) 安装必要工具"
+    echo "  7) 安装BBR加速"
+    echo "  8) 显示系统信息"
+    echo "  0) 退出"
+    echo
+    read -p "请选择 [0-8]: " choice
     
     case $choice in
         1)
-            print_info "开始执行全部优化配置..."
-            install_essential_tools
-            echo ""
+            log_info "开始执行完整系统优化..."
+            deep_fix_apt
+            full_system_update
             configure_hostname
-            echo ""
             change_user_password
-            echo ""
             change_ssh_port
-            echo ""
-            system_update_cleanup
-            echo ""
+            install_essential_tools
             install_bbr
-            echo ""
-            print_success "所有优化配置已完成！"
-            print_warning "建议重启系统以应用所有更改: reboot"
+            show_system_info
+            log_success "所有优化已完成！"
+            log_warn "建议重启系统: reboot"
             ;;
         2)
-            change_user_password
+            deep_fix_apt
+            full_system_update
             ;;
         3)
-            change_ssh_port
+            change_user_password
             ;;
         4)
-            system_update_cleanup
+            change_ssh_port
             ;;
         5)
             configure_hostname
@@ -537,43 +641,33 @@ main_menu() {
             show_system_info
             ;;
         0)
-            print_info "退出脚本"
+            log_info "退出脚本"
             exit 0
             ;;
         *)
-            print_error "无效的选项"
+            log_error "无效选项"
             sleep 2
             main_menu
             ;;
     esac
     
-    echo ""
-    read -p "按Enter键返回主菜单，按Ctrl+C退出..."
+    echo
+    read -p "按Enter键返回主菜单，Ctrl+C退出..."
     main_menu
 }
 
-# 主程序入口
+# 主函数
 main() {
     clear
     
-    # 检查权限
+    # 初始化
+    init_log
     check_root
-    
-    # 检查系统
     check_system
-    
-    # 首次运行时尝试修复APT源
-    if [ ! -f /tmp/apt_fixed ]; then
-        print_info "首次运行，检查APT源状态..."
-        fix_apt_sources && touch /tmp/apt_fixed
-    fi
     
     # 显示主菜单
     main_menu
 }
 
-# 捕获Ctrl+C
-trap 'echo ""; print_warning "脚本被用户中断"; exit 1' INT
-
 # 运行主程序
-main
+main "$@"
