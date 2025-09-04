@@ -562,6 +562,12 @@ main() {
     # 检查系统
     check_system
     
+    # 首次运行时尝试修复APT源
+    if [ ! -f /tmp/apt_fixed ]; then
+        print_info "首次运行，检查APT源状态..."
+        fix_apt_sources && touch /tmp/apt_fixed
+    fi
+    
     # 显示主菜单
     main_menu
 }
