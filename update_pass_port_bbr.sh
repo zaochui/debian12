@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # Debian 12 一键优化配置脚本
-# 功能：修改用户密码、修改SSH端口、系统更新、安装BBR
+# 功能：修改用户密码、修改SSH端口、系统更新、配置主机名、安装工具、安装BBR
 # 作者：System Admin Tools
-# 版本：1.0
+# 版本：2.2
 
 set -e
 
@@ -226,7 +226,194 @@ system_update_cleanup() {
     print_success "系统更新和清理完成"
 }
 
-# 4. 安装和启用BBR
+# 4. 配置主机名
+configure_hostname() {
+    print_info "========== 配置主机名 =========="
+    
+    # 显示当前主机名
+    CURRENT_HOSTNAME=$(hostname)
+    CURRENT_FQDN=$(hostname -f 2>/dev/null || hostname)
+    print_info "当前主机名: $CURRENT_HOSTNAME"
+    print_info "当前FQDN: $CURRENT_FQDN"
+    
+    read -p "是否要修改主机名？(y/n): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        read -p "请输入新的主机名 (例如: server.domain.com): " NEW_HOSTNAME
+        
+        if [ -z "$NEW_HOSTNAME" ]; then
+            print_error "主机名不能为空"
+            return 1
+        fi
+        
+        # 获取短主机名
+        SHORT_HOSTNAME=$(echo $NEW_HOSTNAME | cut -d. -f1)
+        
+        # 设置主机名
+        print_info "设置主机名为: $NEW_HOSTNAME"
+        hostnamectl set-hostname $NEW_HOSTNAME
+        
+        # 同时更新 /etc/hostname
+        echo "$SHORT_HOSTNAME" > /etc/hostname
+        
+        # 获取服务器IP
+        SERVER_IP=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -1)
+        if [ -z "$SERVER_IP" ]; then
+            read -p "请输入服务器的公网IP地址: " SERVER_IP
+        else
+            print_info "检测到的服务器IP: $SERVER_IP"
+            read -p "是否使用此IP？(y/n): " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                read -p "请输入正确的服务器IP地址: " SERVER_IP
+            fi
+        fi
+        
+        # 备份 hosts 文件
+        cp /etc/hosts /etc/hosts.bak.$(date +%Y%m%d_%H%M%S)
+        print_info "已备份 /etc/hosts 到 /etc/hosts.bak.$(date +%Y%m%d_%H%M%S)"
+        
+        # 更新 /etc/hosts
+        print_info "更新 /etc/hosts 文件..."
+        
+        # 创建新的 hosts 文件内容
+        {
+            echo "127.0.0.1   localhost"
+            echo "127.0.1.1   $SHORT_HOSTNAME"
+            echo "$SERVER_IP   $NEW_HOSTNAME $SHORT_HOSTNAME"
+            echo ""
+            echo "# The following lines are desirable for IPv6 capable hosts"
+            echo "::1     localhost ip6-localhost ip6-loopback"
+            echo "ff02::1 ip6-allnodes"
+            echo "ff02::2 ip6-allrouters"
+        } > /etc/hosts.new
+        
+        # 保留原文件中的其他自定义条目（排除旧主机名相关的）
+        if [ -f /etc/hosts ]; then
+            grep -v -E "^[^#].*($CURRENT_HOSTNAME|$CURRENT_FQDN|localhost)" /etc/hosts | \
+            grep -v -E "^(127\.0\.0\.1|127\.0\.1\.1|::1|ff02::)" | \
+            grep -v "^$" >> /etc/hosts.new || true
+        fi
+        
+        # 替换原文件
+        mv /etc/hosts.new /etc/hosts
+        
+        print_success "主机名已成功设置为: $NEW_HOSTNAME"
+        print_info "/etc/hostname 内容: $(cat /etc/hostname)"
+        print_info "/etc/hosts 相关条目:"
+        grep -E "$NEW_HOSTNAME|$SHORT_HOSTNAME" /etc/hosts
+        
+        # 验证设置
+        print_info "验证主机名设置..."
+        print_info "hostname 命令: $(hostname)"
+        print_info "hostname -f 命令: $(hostname -f 2>/dev/null || echo '无法获取FQDN')"
+    fi
+}
+
+# 5. 安装必要工具和常用命令
+install_essential_tools() {
+    print_info "========== 安装必要工具和常用命令 =========="
+    
+    print_info "安装基础工具包..."
+    apt install -y \
+        wget \
+        curl \
+        git \
+        vim \
+        nano \
+        sudo \
+        net-tools \
+        dnsutils \
+        software-properties-common \
+        apt-transport-https \
+        ca-certificates \
+        gnupg \
+        lsb-release \
+        unzip \
+        zip \
+        tar \
+        gzip \
+        bzip2 \
+        xz-utils
+    
+    print_info "安装系统监控工具..."
+    apt install -y \
+        htop \
+        iotop \
+        iftop \
+        nethogs \
+        ncdu \
+        tmux \
+        screen
+    
+    print_info "安装网络工具..."
+    apt install -y \
+        iputils-ping \
+        traceroute \
+        mtr \
+        nmap \
+        telnet \
+        tcpdump \
+        netcat-openbsd \
+        socat \
+        dnsutils \
+        whois
+    
+    print_info "安装开发工具..."
+    apt install -y \
+        build-essential \
+        make \
+        gcc \
+        g++ \
+        python3 \
+        python3-pip \
+        nodejs \
+        npm
+    
+    print_info "安装其他实用工具..."
+    apt install -y \
+        rsync \
+        cron \
+        logrotate \
+        bash-completion \
+        command-not-found \
+        tree \
+        jq \
+        neofetch \
+        ncurses-term
+    
+    # 配置 vim 基础设置
+    cat > /etc/vim/vimrc.local << 'EOF'
+set number
+set autoindent
+set tabstop=4
+set shiftwidth=4
+set expandtab
+set paste
+syntax on
+EOF
+    
+    # 配置 bash 别名
+    cat >> /etc/bash.bashrc << 'EOF'
+
+# Custom aliases
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+alias ..='cd ..'
+alias ...='cd ../..'
+alias grep='grep --color=auto'
+alias df='df -h'
+alias du='du -h'
+alias free='free -h'
+alias top='htop'
+alias ports='netstat -tulanp'
+EOF
+    
+    print_success "必要工具和常用命令安装完成"
+}
+
+# 6. 安装和启用BBR
 install_bbr() {
     print_info "========== 安装BBR =========="
     
@@ -277,34 +464,46 @@ EOF
 show_system_info() {
     print_info "========== 系统信息 =========="
     echo "主机名: $(hostname)"
+    echo "FQDN: $(hostname -f 2>/dev/null || echo 'N/A')"
     echo "系统版本: $(cat /etc/os-release | grep PRETTY_NAME | cut -d'"' -f2)"
     echo "内核版本: $(uname -r)"
     echo "CPU: $(lscpu | grep 'Model name' | cut -d':' -f2 | xargs)"
     echo "内存: $(free -h | grep Mem | awk '{print $2}')"
     echo "磁盘: $(df -h / | tail -1 | awk '{print $2}')"
+    echo "IP地址: $(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -1)"
     echo "当前时间: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo ""
+    print_info "/etc/hosts 文件内容:"
+    cat /etc/hosts
 }
 
 # 主菜单
 main_menu() {
     clear
     echo "╔══════════════════════════════════════════════╗"
-    echo "║       Debian 12 系统优化配置脚本 v1.0        ║"
+    echo "║     Debian 12 系统优化配置脚本 v2.2          ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
     echo "请选择要执行的操作："
-    echo "1) 执行所有优化（推荐）"
-    echo "2) 仅修改用户密码"
-    echo "3) 仅修改SSH端口"
-    echo "4) 仅更新系统和清理"
-    echo "5) 仅安装BBR"
-    echo "6) 显示系统信息"
+    echo "1) 执行全部优化（推荐）"
+    echo "2) 修改用户密码"
+    echo "3) 修改SSH端口"
+    echo "4) 系统更新和清理"
+    echo "5) 配置主机名"
+    echo "6) 安装必要工具"
+    echo "7) 安装BBR加速"
+    echo "8) 显示系统信息"
     echo "0) 退出"
     echo ""
-    read -p "请输入选项 [0-6]: " choice
+    read -p "请输入选项 [0-8]: " choice
     
     case $choice in
         1)
+            print_info "开始执行全部优化配置..."
+            install_essential_tools
+            echo ""
+            configure_hostname
+            echo ""
             change_user_password
             echo ""
             change_ssh_port
@@ -314,6 +513,7 @@ main_menu() {
             install_bbr
             echo ""
             print_success "所有优化配置已完成！"
+            print_warning "建议重启系统以应用所有更改: reboot"
             ;;
         2)
             change_user_password
@@ -325,9 +525,15 @@ main_menu() {
             system_update_cleanup
             ;;
         5)
-            install_bbr
+            configure_hostname
             ;;
         6)
+            install_essential_tools
+            ;;
+        7)
+            install_bbr
+            ;;
+        8)
             show_system_info
             ;;
         0)
