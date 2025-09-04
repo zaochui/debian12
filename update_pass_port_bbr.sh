@@ -344,7 +344,7 @@ install_essential_tools() {
         nethogs \
         ncdu \
         tmux \
-        screen
+        screen || print_warning "部分监控工具安装失败，继续..."
     
     print_info "安装网络工具..."
     apt install -y \
@@ -357,7 +357,7 @@ install_essential_tools() {
         netcat-openbsd \
         socat \
         dnsutils \
-        whois
+        whois || print_warning "部分网络工具安装失败，继续..."
     
     print_info "安装开发工具..."
     apt install -y \
@@ -368,7 +368,7 @@ install_essential_tools() {
         python3 \
         python3-pip \
         nodejs \
-        npm
+        npm || print_warning "部分开发工具安装失败，继续..."
     
     print_info "安装其他实用工具..."
     apt install -y \
@@ -380,7 +380,7 @@ install_essential_tools() {
         tree \
         jq \
         neofetch \
-        ncurses-term
+        ncurses-term || print_warning "部分实用工具安装失败，继续..."
     
     # 配置 vim 基础设置
     cat > /etc/vim/vimrc.local << 'EOF'
