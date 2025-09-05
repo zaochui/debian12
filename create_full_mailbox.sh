@@ -25,19 +25,20 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# 交互式输入
+# 标题
 echo "========================================="
 echo "   Postfix + Dovecot 邮箱创建工具"
 echo "========================================="
 echo ""
 
-# 如果提供了命令行参数，使用参数；否则交互式输入
+# 获取邮箱和密码
 if [ $# -eq 2 ]; then
+    # 如果提供了命令行参数，直接使用
     EMAIL=$1
     PASSWORD=$2
     print_info "使用命令行参数创建邮箱: $EMAIL"
 else
-    # 输入邮箱地址
+    # 交互式输入邮箱地址
     while true; do
         read -p "请输入邮箱地址 (例如: user@example.com): " EMAIL
         if [[ "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
@@ -47,7 +48,7 @@ else
         fi
     done
 
-    # 输入密码
+    # 交互式输入密码
     while true; do
         read -s -p "请输入密码 (至少6位): " PASSWORD
         echo ""
@@ -177,7 +178,7 @@ print_info "重载邮件服务..."
 systemctl reload postfix 2>/dev/null || service postfix reload 2>/dev/null
 systemctl reload dovecot 2>/dev/null || service dovecot reload 2>/dev/null
 
-# 12. 测试账号
+# 12. 显示结果
 echo ""
 echo "========================================="
 print_info "${GREEN}邮箱创建成功！${NC}"
@@ -214,11 +215,12 @@ echo "  3. 使用 'postfix check' 检查Postfix配置"
 echo "  4. 使用 'dovecot -n' 查看Dovecot配置"
 echo ""
 
-# 询问是否创建另一个邮箱
+# 询问是否创建另一个邮箱（仅在交互模式下）
 if [ $# -eq 0 ]; then
     read -p "是否创建另一个邮箱？(y/n): " CREATE_ANOTHER
     if [[ "$CREATE_ANOTHER" =~ ^[Yy]$ ]]; then
-        exec "$0"
+        # 重新运行脚本
+        bash "$0"
     fi
 fi
 
